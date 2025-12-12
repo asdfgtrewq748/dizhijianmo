@@ -120,17 +120,20 @@ class GeoGraphSAGE(nn.Module):
         # 输出层
         self.convs.append(SAGEConv(hidden_channels, out_channels, aggr=aggr))
 
-    def forward(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, edge_index: torch.Tensor,
+                edge_weight: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
         前向传播
 
         Args:
             x: 节点特征 [num_nodes, in_channels]
             edge_index: 边索引 [2, num_edges]
+            edge_weight: 边权重 (可选, SAGEConv不使用但保留以统一接口)
 
         Returns:
             out: 分类logits [num_nodes, out_channels]
         """
+        # Note: SAGEConv does not use edge_weight; parameter kept for API consistency
         for i in range(self.num_layers - 1):
             x = self.convs[i](x, edge_index)
             if self.use_batch_norm:
@@ -141,9 +144,10 @@ class GeoGraphSAGE(nn.Module):
         x = self.convs[-1](x, edge_index)
         return x
 
-    def predict(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+    def predict(self, x: torch.Tensor, edge_index: torch.Tensor,
+                edge_weight: Optional[torch.Tensor] = None) -> torch.Tensor:
         """预测岩性类别"""
-        logits = self.forward(x, edge_index)
+        logits = self.forward(x, edge_index, edge_weight)
         return torch.argmax(logits, dim=1)
 
 
@@ -188,8 +192,12 @@ class GeoGAT(nn.Module):
         self.convs.append(GATConv(hidden_channels * heads, out_channels,
                                   heads=1, concat=False, dropout=dropout))
 
-    def forward(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
-        """前向传播"""
+    def forward(self, x: torch.Tensor, edge_index: torch.Tensor,
+                edge_weight: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """前向传播
+        
+        Note: edge_weight is accepted for API consistency but GATConv does not use it.
+        """
         for i in range(self.num_layers - 1):
             x = self.convs[i](x, edge_index)
             if self.use_batch_norm:
@@ -200,9 +208,10 @@ class GeoGAT(nn.Module):
         x = self.convs[-1](x, edge_index)
         return x
 
-    def predict(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+    def predict(self, x: torch.Tensor, edge_index: torch.Tensor,
+                edge_weight: Optional[torch.Tensor] = None) -> torch.Tensor:
         """预测岩性类别"""
-        logits = self.forward(x, edge_index)
+        logits = self.forward(x, edge_index, edge_weight)
         return torch.argmax(logits, dim=1)
 
 

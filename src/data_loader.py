@@ -143,6 +143,9 @@ class BoreholeDataProcessor:
             # 序号大的在前面（靠近地表），需要反转
             df = df.sort_values('layer_id', ascending=False).reset_index(drop=True)
 
+        # 为每一层添加序号（从地表向下），用于保留层序信息
+        df['layer_order'] = np.arange(len(df))
+
         # 计算每层的顶底深度
         # 从地表(z=0)开始，累加厚度得到深度
         df['thickness'] = pd.to_numeric(df['thickness'], errors='coerce').fillna(0)
@@ -182,6 +185,10 @@ class BoreholeDataProcessor:
                     'y': y,
                     'z': surface_z - z_depth,  # 深度为负值
                     'lithology': lithology,
+                    'layer_order': row['layer_order'],  # 层序编号，保留同岩性不同层位的差异
+                    'top_depth': row['top_depth'],
+                    'bottom_depth': row['bottom_depth'],
+                    'center_depth': row['center_depth'],
                     'layer_thickness': row['thickness'],
                     'elastic_modulus': elastic_modulus,
                     'density': density,

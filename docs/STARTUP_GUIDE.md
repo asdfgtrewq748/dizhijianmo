@@ -19,7 +19,7 @@
 | 操作系统 | Windows 10/11, Linux, macOS |
 | Python | 3.9 - 3.11 (推荐 3.10) |
 | 内存 | 最低 8GB，推荐 16GB+ |
-| GPU | 可选，支持 CUDA 11.8+ 的 NVIDIA 显卡 |
+| GPU | 可选，支持 CUDA 的 NVIDIA 显卡 (RTX 50系列需要 CUDA 13.0+) |
 
 ### 前置软件
 
@@ -50,14 +50,23 @@ source geomodel_env/bin/activate
 
 根据你的硬件选择安装命令:
 
-**有 NVIDIA GPU (CUDA 11.8):**
+**RTX 50 系列显卡 (Blackwell 架构, 如 5060 Ti, 5070, 5080, 5090):**
+
+> ⚠️ RTX 50 系列需要 **CUDA 13.0+** 和 **PyTorch 2.9+**
+
 ```bash
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+# 安装 PyTorch 2.9.1 + CUDA 13.0
+pip install torch==2.9.1 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu130
 ```
 
-**有 NVIDIA GPU (CUDA 12.1):**
+**RTX 40/30/20 系列显卡 (CUDA 12.4):**
 ```bash
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+```
+
+**RTX 40/30/20 系列显卡 (CUDA 11.8, 旧版兼容):**
+```bash
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
 ```
 
 **仅 CPU:**
@@ -71,8 +80,17 @@ pip install torch torchvision torchaudio --index-url https://download.pytorch.or
 pip install torch-geometric
 ```
 
-如果安装遇到问题，可以尝试:
+如果安装遇到问题，根据你的 CUDA 版本选择:
 ```bash
+# RTX 50 系列 (CUDA 13.0, PyTorch 2.9.1)
+pip install torch-scatter torch-sparse torch-cluster torch-spline-conv -f https://data.pyg.org/whl/torch-2.9.0+cu130.html
+pip install torch-geometric
+
+# RTX 40/30/20 系列 (CUDA 12.4, PyTorch 2.5)
+pip install torch-scatter torch-sparse torch-cluster torch-spline-conv -f https://data.pyg.org/whl/torch-2.5.0+cu124.html
+pip install torch-geometric
+
+# 旧版 (CUDA 11.8, PyTorch 2.0)
 pip install torch-scatter torch-sparse torch-cluster torch-spline-conv -f https://data.pyg.org/whl/torch-2.0.0+cu118.html
 pip install torch-geometric
 ```

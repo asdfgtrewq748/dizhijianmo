@@ -51,29 +51,102 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
+# ==================== SCI论文配图样式配置 ====================
+# 专业配色方案 - 适合地质图
+GEOLOGY_COLORS = [
+    '#E64B35',  # 红色 - 煤层
+    '#4DBBD5',  # 青色 - 砂岩
+    '#00A087',  # 绿色 - 泥岩
+    '#3C5488',  # 深蓝 - 砾岩
+    '#F39B7F',  # 橙色 - 粉砂岩
+    '#8491B4',  # 灰蓝 - 页岩
+    '#91D1C2',  # 浅绿 - 灰岩
+    '#DC0000',  # 深红
+    '#7E6148',  # 棕色 - 土层
+    '#B09C85',  # 米色
+    '#00468B',  # 海军蓝
+    '#ED0000',  # 亮红
+    '#42B540',  # 草绿
+    '#0099B4',  # 湖蓝
+    '#925E9F',  # 紫色
+    '#FDAF91',  # 浅橙
+    '#AD002A',  # 酒红
+    '#ADB6B6',  # 银灰
+]
+
+# SCI论文图表通用配置
+SCI_LAYOUT = dict(
+    font=dict(
+        family="Arial, sans-serif",
+        size=12,
+        color='#333333'
+    ),
+    paper_bgcolor='white',
+    plot_bgcolor='white',
+    margin=dict(l=60, r=20, t=50, b=60),
+)
+
+# 坐标轴通用配置
+SCI_AXIS = dict(
+    showline=True,
+    linewidth=1.5,
+    linecolor='#333333',
+    showgrid=True,
+    gridwidth=0.5,
+    gridcolor='#E5E5E5',
+    zeroline=False,
+    ticks='outside',
+    tickwidth=1.5,
+    tickcolor='#333333',
+    title_font=dict(size=12, family="Arial, sans-serif"),
+    mirror=True,
+)
+
+# 图例通用配置
+SCI_LEGEND = dict(
+    font=dict(size=10, family="Arial, sans-serif"),
+    bgcolor='rgba(255,255,255,0.9)',
+    bordercolor='#CCCCCC',
+    borderwidth=1,
+)
+
+
 def get_color_palette(n: int) -> list:
-    """Return a palette with at least n distinct colors."""
-    base_palette = (
-        px.colors.qualitative.Dark24
-        + px.colors.qualitative.Light24
-        + px.colors.qualitative.Alphabet
-        + px.colors.qualitative.Safe
-        + px.colors.qualitative.Vivid
-        + px.colors.qualitative.Plotly
-        + px.colors.qualitative.Set3
+    """Return a palette with at least n distinct colors for geological data."""
+    if n <= len(GEOLOGY_COLORS):
+        return GEOLOGY_COLORS[:n]
+
+    # 如果需要更多颜色，扩展调色板
+    extended = GEOLOGY_COLORS.copy()
+    additional = (
+        px.colors.qualitative.Set2
+        + px.colors.qualitative.Pastel1
+        + px.colors.qualitative.Dark2
     )
+    extended.extend(additional)
 
-    if n <= len(base_palette):
-        return base_palette[:n]
+    if n <= len(extended):
+        return extended[:n]
 
-    repeats = (n + len(base_palette) - 1) // len(base_palette)
-    return (base_palette * repeats)[:n]
+    repeats = (n + len(extended) - 1) // len(extended)
+    return (extended * repeats)[:n]
+
+
+def apply_sci_style(fig: go.Figure, height: int = 500) -> go.Figure:
+    """应用SCI论文样式到图表"""
+    fig.update_layout(
+        **SCI_LAYOUT,
+        height=height,
+    )
+    fig.update_xaxes(**SCI_AXIS)
+    fig.update_yaxes(**SCI_AXIS)
+    return fig
 
 
 # ==================== 可视化函数 ====================
 def plot_borehole_3d(df: pd.DataFrame, color_col: str = 'lithology') -> go.Figure:
     """
-    绘制三维钻孔散点图
+    绘制三维钻孔散点图 - SCI论文质量
     """
     fig = go.Figure()
 
@@ -92,35 +165,60 @@ def plot_borehole_3d(df: pd.DataFrame, color_col: str = 'lithology') -> go.Figur
             mode='markers',
             name=str(category),
             marker=dict(
-                size=3,
+                size=4,
                 color=color_map[category],
-                opacity=0.8
+                opacity=0.85,
+                line=dict(width=0.5, color='#333333')
             ),
             hovertemplate=(
                 f"<b>{category}</b><br>"
-                "X: %{x:.1f}<br>"
-                "Y: %{y:.1f}<br>"
-                "Z: %{z:.1f}m<br>"
+                "X: %{x:.1f} m<br>"
+                "Y: %{y:.1f} m<br>"
+                "Z: %{z:.1f} m<br>"
                 "<extra></extra>"
             )
         ))
 
+    # SCI风格的3D场景配置
+    scene_axis = dict(
+        backgroundcolor='#FAFAFA',
+        gridcolor='#E0E0E0',
+        gridwidth=1,
+        showbackground=True,
+        linecolor='#333333',
+        linewidth=2,
+        tickfont=dict(size=10, family="Arial"),
+        title_font=dict(size=12, family="Arial"),
+    )
+
     fig.update_layout(
-        title="三维钻孔数据可视化",
+        title=dict(
+            text="<b>3D Borehole Data Visualization</b>",
+            font=dict(size=14, family="Arial", color='#333333'),
+            x=0.5,
+            xanchor='center'
+        ),
         scene=dict(
-            xaxis_title="X (m)",
-            yaxis_title="Y (m)",
-            zaxis_title="深度 (m)",
-            aspectmode='data'
+            xaxis=dict(**scene_axis, title="X (m)"),
+            yaxis=dict(**scene_axis, title="Y (m)"),
+            zaxis=dict(**scene_axis, title="Depth (m)"),
+            aspectmode='data',
+            camera=dict(
+                eye=dict(x=1.5, y=1.5, z=1.2)
+            )
         ),
         legend=dict(
-            title=color_col,
+            **SCI_LEGEND,
+            title=dict(text="<b>Lithology</b>", font=dict(size=11)),
             yanchor="top",
-            y=0.99,
+            y=0.95,
             xanchor="left",
-            x=0.01
+            x=0.02,
+            itemsizing='constant'
         ),
-        margin=dict(l=0, r=0, t=40, b=0)
+        paper_bgcolor='white',
+        margin=dict(l=0, r=0, t=50, b=0),
+        height=600
     )
 
     return fig
@@ -133,7 +231,7 @@ def plot_predictions_3d(
     true_labels: np.ndarray = None,
     show_errors: bool = False
 ) -> go.Figure:
-    """绘制预测结果的三维可视化"""
+    """绘制预测结果的三维可视化 - SCI论文质量"""
     fig = go.Figure()
 
     colors = get_color_palette(len(lithology_classes))
@@ -151,8 +249,13 @@ def plot_predictions_3d(
                     y=coords[correct_mask, 1],
                     z=coords[correct_mask, 2],
                     mode='markers',
-                    name=f"{class_name} (正确)",
-                    marker=dict(size=3, color=colors[i], opacity=0.8),
+                    name=f"{class_name} (Correct)",
+                    marker=dict(
+                        size=4,
+                        color=colors[i],
+                        opacity=0.85,
+                        line=dict(width=0.5, color='#333333')
+                    ),
                 ))
 
             if error_mask.any():
@@ -161,9 +264,14 @@ def plot_predictions_3d(
                     y=coords[error_mask, 1],
                     z=coords[error_mask, 2],
                     mode='markers',
-                    name=f"{class_name} (错误)",
-                    marker=dict(size=5, color=colors[i], opacity=1.0,
-                               symbol='x', line=dict(width=2, color='red')),
+                    name=f"{class_name} (Error)",
+                    marker=dict(
+                        size=6,
+                        color=colors[i],
+                        opacity=1.0,
+                        symbol='x',
+                        line=dict(width=2, color='#DC0000')
+                    ),
                 ))
         else:
             if mask.any():
@@ -173,30 +281,69 @@ def plot_predictions_3d(
                     z=coords[mask, 2],
                     mode='markers',
                     name=class_name,
-                    marker=dict(size=3, color=colors[i], opacity=0.8),
+                    marker=dict(
+                        size=4,
+                        color=colors[i],
+                        opacity=0.85,
+                        line=dict(width=0.5, color='#333333')
+                    ),
                 ))
 
+    # SCI风格的3D场景配置
+    scene_axis = dict(
+        backgroundcolor='#FAFAFA',
+        gridcolor='#E0E0E0',
+        gridwidth=1,
+        showbackground=True,
+        linecolor='#333333',
+        linewidth=2,
+        tickfont=dict(size=10, family="Arial"),
+        title_font=dict(size=12, family="Arial"),
+    )
+
     fig.update_layout(
-        title="模型预测结果",
-        scene=dict(
-            xaxis_title="X (m)",
-            yaxis_title="Y (m)",
-            zaxis_title="深度 (m)",
-            aspectmode='data'
+        title=dict(
+            text="<b>Model Prediction Results</b>",
+            font=dict(size=14, family="Arial", color='#333333'),
+            x=0.5,
+            xanchor='center'
         ),
-        margin=dict(l=0, r=0, t=40, b=0)
+        scene=dict(
+            xaxis=dict(**scene_axis, title="X (m)"),
+            yaxis=dict(**scene_axis, title="Y (m)"),
+            zaxis=dict(**scene_axis, title="Depth (m)"),
+            aspectmode='data',
+            camera=dict(eye=dict(x=1.5, y=1.5, z=1.2))
+        ),
+        legend=dict(
+            **SCI_LEGEND,
+            title=dict(text="<b>Lithology</b>", font=dict(size=11)),
+            yanchor="top",
+            y=0.95,
+            xanchor="left",
+            x=0.02,
+            itemsizing='constant'
+        ),
+        paper_bgcolor='white',
+        margin=dict(l=0, r=0, t=50, b=0),
+        height=600
     )
 
     return fig
 
 
 def plot_borehole_column(df: pd.DataFrame, borehole_id: str) -> go.Figure:
-    """
-    绘制单个钻孔柱状图
-    """
-    bh_data = df[df['borehole_id'] == borehole_id].sort_values('z', ascending=False)
+    """绘制单个钻孔柱状图，保持层序，不合并同名岩层。"""
+    bh_data = df[df['borehole_id'] == borehole_id].copy()
 
-    if bh_data.empty:
+    if 'layer_order' in bh_data.columns:
+        layers = (bh_data
+                  .sort_values('layer_order')
+                  .drop_duplicates('layer_order'))
+    else:
+        layers = bh_data.sort_values('z', ascending=False)
+
+    if layers.empty:
         return go.Figure()
 
     lithologies = sorted(bh_data['lithology'].unique())
@@ -205,30 +352,48 @@ def plot_borehole_column(df: pd.DataFrame, borehole_id: str) -> go.Figure:
 
     fig = go.Figure()
 
-    for _, row in bh_data.iterrows():
+    for _, row in layers.iterrows():
+        top_depth = row.get('top_depth', None)
+        bottom_depth = row.get('bottom_depth', None)
+        depth_range = None
+        if top_depth is not None and bottom_depth is not None:
+            depth_range = f"{top_depth:.1f} ~ {bottom_depth:.1f} m"
+
         fig.add_trace(go.Bar(
             x=[row['layer_thickness']],
             y=[row['lithology']],
             orientation='h',
-            marker_color=color_map[row['lithology']],
-            text=f"{row['layer_thickness']:.1f}m",
+            marker=dict(
+                color=color_map[row['lithology']],
+                line=dict(color='#333333', width=1)
+            ),
+            text=f"厚度: {row['layer_thickness']:.1f}m" + (f" | 深度: {depth_range}" if depth_range else ""),
             textposition='inside',
             showlegend=False,
             hovertemplate=(
                 f"岩性: {row['lithology']}<br>"
-                f"深度: {abs(row['z']):.1f}m<br>"
-                f"厚度: {row['layer_thickness']:.1f}m<br>"
+                + (f"深度范围: {depth_range}<br>" if depth_range else "")
+                + f"厚度: {row['layer_thickness']:.1f}m<br>"
                 "<extra></extra>"
             )
         ))
 
     fig.update_layout(
-        title=f"钻孔 {borehole_id} 柱状图",
-        xaxis_title="厚度 (m)",
-        yaxis_title="岩性",
+        title=dict(
+            text=f"<b>Borehole {borehole_id} Stratigraphic Column</b>",
+            font=dict(size=14, family="Arial", color='#333333'),
+            x=0.5,
+            xanchor='center'
+        ),
+        xaxis_title="<b>Thickness (m)</b>",
+        yaxis_title="<b>Lithology</b>",
         barmode='stack',
-        height=600
+        height=600,
+        yaxis=dict(autorange='reversed'),
+        **SCI_LAYOUT
     )
+    fig.update_xaxes(**SCI_AXIS)
+    fig.update_yaxes(**SCI_AXIS, tickfont=dict(size=10))
 
     return fig
 
@@ -241,7 +406,7 @@ def plot_cross_section(
     position: float = None,
     thickness: float = 100
 ) -> go.Figure:
-    """绘制剖面图"""
+    """绘制剖面图 - SCI论文质量"""
     axis_idx = {'x': 0, 'y': 1}[axis]
     other_axes = [1, 2] if axis == 'x' else [0, 2]
 
@@ -261,99 +426,207 @@ def plot_cross_section(
                 y=coords[class_mask, other_axes[1]],
                 mode='markers',
                 name=class_name,
-                marker=dict(size=6, color=colors[i], opacity=0.8),
+                marker=dict(
+                    size=8,
+                    color=colors[i],
+                    opacity=0.85,
+                    line=dict(width=0.5, color='#333333'),
+                    symbol='circle'
+                )
             ))
 
-    xlabel = 'Y (m)' if axis == 'x' else 'X (m)'
+    xlabel = '<b>Y (m)</b>' if axis == 'x' else '<b>X (m)</b>'
     fig.update_layout(
-        title=f"剖面图 ({axis.upper()}={position:.1f}m, 厚度±{thickness/2:.0f}m)",
+        title=dict(
+            text=f"<b>Cross Section ({axis.upper()}={position:.1f} m, Width: ±{thickness/2:.0f} m)</b>",
+            font=dict(size=14, family="Arial", color='#333333'),
+            x=0.5,
+            xanchor='center'
+        ),
         xaxis_title=xlabel,
-        yaxis_title="深度 (m)",
-        legend=dict(title="岩性"),
+        yaxis_title="<b>Depth (m)</b>",
+        legend=dict(
+            **SCI_LEGEND,
+            title=dict(text="<b>Lithology</b>", font=dict(size=11)),
+            yanchor="top",
+            y=0.98,
+            xanchor="right",
+            x=0.98
+        ),
+        height=600,
+        **SCI_LAYOUT
     )
+    fig.update_xaxes(**SCI_AXIS)
+    fig.update_yaxes(**SCI_AXIS)
 
     return fig
 
 
 def plot_training_history(history: dict) -> go.Figure:
-    """绘制训练历史曲线"""
+    """绘制训练历史曲线 - SCI论文质量"""
     fig = go.Figure()
 
+    epochs = list(range(1, len(history['train_loss']) + 1))
+
     fig.add_trace(go.Scatter(
+        x=epochs,
         y=history['train_loss'],
-        mode='lines',
-        name='训练损失',
-        line=dict(color='blue')
+        mode='lines+markers',
+        name='Training Loss',
+        line=dict(color='#3C5488', width=2),
+        marker=dict(size=4, symbol='circle')
     ))
     fig.add_trace(go.Scatter(
+        x=epochs,
         y=history['val_loss'],
-        mode='lines',
-        name='验证损失',
-        line=dict(color='orange')
+        mode='lines+markers',
+        name='Validation Loss',
+        line=dict(color='#E64B35', width=2),
+        marker=dict(size=4, symbol='square')
     ))
 
     fig.update_layout(
-        title="训练过程 - 损失曲线",
-        xaxis_title="Epoch",
-        yaxis_title="Loss",
-        legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99)
+        title=dict(
+            text="<b>Training Progress - Loss Curve</b>",
+            font=dict(size=14, family="Arial", color='#333333'),
+            x=0.5,
+            xanchor='center'
+        ),
+        xaxis_title="<b>Epoch</b>",
+        yaxis_title="<b>Loss</b>",
+        legend=dict(
+            **SCI_LEGEND,
+            yanchor="top",
+            y=0.98,
+            xanchor="right",
+            x=0.98
+        ),
+        height=400,
+        **SCI_LAYOUT
     )
+    fig.update_xaxes(**SCI_AXIS)
+    fig.update_yaxes(**SCI_AXIS)
 
     return fig
 
 
 def plot_accuracy_history(history: dict) -> go.Figure:
-    """绘制准确率曲线"""
+    """绘制准确率曲线 - SCI论文质量"""
     fig = go.Figure()
 
+    epochs = list(range(1, len(history['train_acc']) + 1))
+
     fig.add_trace(go.Scatter(
+        x=epochs,
         y=history['train_acc'],
-        mode='lines',
-        name='训练准确率',
-        line=dict(color='blue')
+        mode='lines+markers',
+        name='Training Accuracy',
+        line=dict(color='#3C5488', width=2),
+        marker=dict(size=4, symbol='circle')
     ))
     fig.add_trace(go.Scatter(
+        x=epochs,
         y=history['val_acc'],
-        mode='lines',
-        name='验证准确率',
-        line=dict(color='orange')
+        mode='lines+markers',
+        name='Validation Accuracy',
+        line=dict(color='#E64B35', width=2),
+        marker=dict(size=4, symbol='square')
     ))
     fig.add_trace(go.Scatter(
+        x=epochs,
         y=history['val_f1'],
-        mode='lines',
-        name='验证F1',
-        line=dict(color='green', dash='dash')
+        mode='lines+markers',
+        name='Validation F1-Score',
+        line=dict(color='#00A087', width=2, dash='dash'),
+        marker=dict(size=4, symbol='diamond')
     ))
 
     fig.update_layout(
-        title="训练过程 - 准确率曲线",
-        xaxis_title="Epoch",
-        yaxis_title="Score",
-        legend=dict(yanchor="top", y=0.99, xanchor="right", x=0.99)
+        title=dict(
+            text="<b>Training Progress - Accuracy Curve</b>",
+            font=dict(size=14, family="Arial", color='#333333'),
+            x=0.5,
+            xanchor='center'
+        ),
+        xaxis_title="<b>Epoch</b>",
+        yaxis_title="<b>Score</b>",
+        legend=dict(
+            **SCI_LEGEND,
+            yanchor="top",
+            y=0.98,
+            xanchor="right",
+            x=0.98
+        ),
+        height=400,
+        **SCI_LAYOUT
     )
+    fig.update_xaxes(**SCI_AXIS)
+    fig.update_yaxes(**SCI_AXIS, range=[0, 1.05])
 
     return fig
 
 
 def plot_confusion_matrix(cm: np.ndarray, class_names: list) -> go.Figure:
-    """绘制混淆矩阵"""
+    """绘制混淆矩阵 - SCI论文质量"""
+    # 计算归一化混淆矩阵（按行归一化，显示召回率）
+    cm_normalized = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+    cm_normalized = np.nan_to_num(cm_normalized)  # 处理除零
+
+    # 创建注释文本：显示数量和百分比
+    annotations = []
+    for i in range(len(class_names)):
+        for j in range(len(class_names)):
+            annotations.append(f"{cm[i, j]}<br>({cm_normalized[i, j]*100:.1f}%)")
+
+    annotations = np.array(annotations).reshape(cm.shape)
+
     fig = go.Figure(data=go.Heatmap(
         z=cm,
         x=class_names,
         y=class_names,
-        colorscale='Blues',
-        text=cm,
+        colorscale=[
+            [0, '#FFFFFF'],
+            [0.2, '#C6DBEF'],
+            [0.4, '#6BAED6'],
+            [0.6, '#2171B5'],
+            [0.8, '#08519C'],
+            [1.0, '#08306B']
+        ],
+        text=annotations,
         texttemplate="%{text}",
-        textfont={"size": 10},
-        hoverongaps=False
+        textfont=dict(size=10, family="Arial"),
+        hoverongaps=False,
+        colorbar=dict(
+            title=dict(text="<b>Count</b>", font=dict(size=11)),
+            tickfont=dict(size=10),
+            thickness=15
+        )
     ))
 
     fig.update_layout(
-        title="混淆矩阵",
-        xaxis_title="预测类别",
-        yaxis_title="真实类别",
-        xaxis=dict(tickangle=45),
-        height=500
+        title=dict(
+            text="<b>Confusion Matrix</b>",
+            font=dict(size=14, family="Arial", color='#333333'),
+            x=0.5,
+            xanchor='center'
+        ),
+        xaxis_title="<b>Predicted Class</b>",
+        yaxis_title="<b>True Class</b>",
+        xaxis=dict(
+            tickangle=45,
+            tickfont=dict(size=10, family="Arial"),
+            title_font=dict(size=12, family="Arial"),
+            side='bottom'
+        ),
+        yaxis=dict(
+            tickfont=dict(size=10, family="Arial"),
+            title_font=dict(size=12, family="Arial"),
+            autorange='reversed'  # 使对角线从左上到右下
+        ),
+        height=550,
+        paper_bgcolor='white',
+        plot_bgcolor='white',
+        margin=dict(l=80, r=20, t=60, b=100)
     )
 
     return fig
@@ -414,6 +687,14 @@ def main():
         st.session_state.history = None
     if 'predictions' not in st.session_state:
         st.session_state.predictions = None
+    if 'result' not in st.session_state:
+        st.session_state.result = None
+    if 'df' not in st.session_state:
+        st.session_state.df = None
+    if 'eval_results' not in st.session_state:
+        st.session_state.eval_results = None
+    if 'probs' not in st.session_state:
+        st.session_state.probs = None
 
     # Tab 1: 数据探索
     with tab1:
@@ -485,23 +766,68 @@ def main():
             col1, col2 = st.columns(2)
             with col1:
                 st.subheader("岩性分布")
-                litho_counts = df['lithology'].value_counts()
-                fig_bar = px.bar(
-                    x=litho_counts.index,
-                    y=litho_counts.values,
-                    labels={'x': '岩性', 'y': '采样点数'},
-                    color=litho_counts.index,
-                    color_discrete_sequence=px.colors.qualitative.Set3
+                litho_counts = df['lithology'].value_counts().sort_values(ascending=True)
+                colors = get_color_palette(len(litho_counts))
+
+                fig_bar = go.Figure(data=[
+                    go.Bar(
+                        x=litho_counts.values,
+                        y=litho_counts.index,
+                        orientation='h',
+                        marker=dict(
+                            color=colors[:len(litho_counts)],
+                            line=dict(color='#333333', width=1)
+                        ),
+                        text=litho_counts.values,
+                        textposition='outside',
+                        textfont=dict(size=10, family="Arial")
+                    )
+                ])
+                fig_bar.update_layout(
+                    title=dict(
+                        text="<b>Lithology Distribution</b>",
+                        font=dict(size=14, family="Arial", color='#333333'),
+                        x=0.5,
+                        xanchor='center'
+                    ),
+                    xaxis_title="<b>Sample Count</b>",
+                    yaxis_title="<b>Lithology</b>",
+                    height=400,
+                    showlegend=False,
+                    **SCI_LAYOUT
                 )
-                fig_bar.update_layout(showlegend=False)
+                fig_bar.update_xaxes(**SCI_AXIS)
+                fig_bar.update_yaxes(**SCI_AXIS, tickfont=dict(size=10))
                 st.plotly_chart(fig_bar, width="stretch")
 
             with col2:
                 st.subheader("深度分布")
-                fig_hist = px.histogram(
-                    df, x='z', nbins=50,
-                    labels={'z': '深度 (m)', 'count': '采样点数'}
+                fig_hist = go.Figure(data=[
+                    go.Histogram(
+                        x=df['z'],
+                        nbinsx=50,
+                        marker=dict(
+                            color='#3C5488',
+                            line=dict(color='#333333', width=0.5)
+                        ),
+                        opacity=0.85
+                    )
+                ])
+                fig_hist.update_layout(
+                    title=dict(
+                        text="<b>Depth Distribution</b>",
+                        font=dict(size=14, family="Arial", color='#333333'),
+                        x=0.5,
+                        xanchor='center'
+                    ),
+                    xaxis_title="<b>Depth (m)</b>",
+                    yaxis_title="<b>Frequency</b>",
+                    height=400,
+                    bargap=0.05,
+                    **SCI_LAYOUT
                 )
+                fig_hist.update_xaxes(**SCI_AXIS)
+                fig_hist.update_yaxes(**SCI_AXIS)
                 st.plotly_chart(fig_hist, width="stretch")
 
             # 单钻孔柱状图
@@ -624,7 +950,7 @@ def main():
                 st.session_state.predictions = predictions
                 st.session_state.probs = probs
 
-        if 'eval_results' in st.session_state:
+        if 'eval_results' in st.session_state and st.session_state.eval_results is not None:
             eval_results = st.session_state.eval_results
 
             # 关键指标
@@ -645,6 +971,8 @@ def main():
             st.subheader("详细分类报告")
             report_df = pd.DataFrame(eval_results['classification_report']).transpose()
             st.dataframe(report_df, width="stretch")
+        else:
+            st.info("请点击上方“评估模型”获取测试集指标")
 
     # Tab 4: 三维可视化
     with tab4:
@@ -657,7 +985,7 @@ def main():
         data = st.session_state.data
         result = st.session_state.result
         predictions = st.session_state.predictions
-        coords = data.coords.numpy()
+        coords = data.coords.cpu().numpy()
 
         # 可视化选项
         col1, col2 = st.columns([1, 3])
@@ -684,19 +1012,19 @@ def main():
                 fig_3d = plot_predictions_3d(
                     coords, predictions,
                     result['lithology_classes'],
-                    data.y.numpy() if show_errors else None,
+                    data.y.cpu().numpy() if show_errors else None,
                     show_errors
                 )
             elif show_type == "真实标签":
                 fig_3d = plot_predictions_3d(
-                    coords, data.y.numpy(),
+                    coords, data.y.cpu().numpy(),
                     result['lithology_classes']
                 )
             else:
                 fig_3d = plot_predictions_3d(
                     coords, predictions,
                     result['lithology_classes'],
-                    data.y.numpy(),
+                    data.y.cpu().numpy(),
                     show_errors=True
                 )
 
@@ -719,7 +1047,7 @@ def main():
 
         with col2:
             fig_section_true = plot_cross_section(
-                coords, data.y.numpy(),
+                coords, data.y.cpu().numpy(),
                 result['lithology_classes'],
                 axis=section_axis,
                 position=section_pos,
@@ -764,7 +1092,7 @@ def main():
                         k_neighbors=k_interp
                     )
 
-                    coords = data.coords.numpy()
+                    coords = data.coords.cpu().numpy()
                     confidence = probs.max(axis=1)
 
                     # 构建网格并插值
@@ -811,7 +1139,7 @@ def main():
                 # 获取切片
                 slice_data, slice_coords, slice_info = geo_model.get_slice(slice_axis, position=slice_pos)
 
-                # 绘制切片
+                # 绘制切片 - SCI论文质量
                 fig_slice = go.Figure()
 
                 colors = get_color_palette(len(result['lithology_classes']))
@@ -825,12 +1153,22 @@ def main():
                                 y=slice_coords['y'][mask].flatten(),
                                 mode='markers',
                                 name=class_name,
-                                marker=dict(size=5, color=colors[i])
+                                marker=dict(
+                                    size=6,
+                                    color=colors[i],
+                                    opacity=0.85,
+                                    line=dict(width=0.3, color='#333333')
+                                )
                             ))
                     fig_slice.update_layout(
-                        title=f"水平切片 (Z = {slice_pos:.1f} m)",
-                        xaxis_title="X (m)",
-                        yaxis_title="Y (m)"
+                        title=dict(
+                            text=f"<b>Horizontal Slice (Z = {slice_pos:.1f} m)</b>",
+                            font=dict(size=14, family="Arial", color='#333333'),
+                            x=0.5,
+                            xanchor='center'
+                        ),
+                        xaxis_title="<b>X (m)</b>",
+                        yaxis_title="<b>Y (m)</b>"
                     )
                 elif slice_axis == 'x':
                     for i, class_name in enumerate(result['lithology_classes']):
@@ -841,12 +1179,22 @@ def main():
                                 y=slice_coords['z'][mask].flatten(),
                                 mode='markers',
                                 name=class_name,
-                                marker=dict(size=5, color=colors[i])
+                                marker=dict(
+                                    size=6,
+                                    color=colors[i],
+                                    opacity=0.85,
+                                    line=dict(width=0.3, color='#333333')
+                                )
                             ))
                     fig_slice.update_layout(
-                        title=f"X剖面 (X = {slice_pos:.1f} m)",
-                        xaxis_title="Y (m)",
-                        yaxis_title="Z (m)"
+                        title=dict(
+                            text=f"<b>X Cross Section (X = {slice_pos:.1f} m)</b>",
+                            font=dict(size=14, family="Arial", color='#333333'),
+                            x=0.5,
+                            xanchor='center'
+                        ),
+                        xaxis_title="<b>Y (m)</b>",
+                        yaxis_title="<b>Z (m)</b>"
                     )
                 else:
                     for i, class_name in enumerate(result['lithology_classes']):
@@ -857,13 +1205,39 @@ def main():
                                 y=slice_coords['z'][mask].flatten(),
                                 mode='markers',
                                 name=class_name,
-                                marker=dict(size=5, color=colors[i])
+                                marker=dict(
+                                    size=6,
+                                    color=colors[i],
+                                    opacity=0.85,
+                                    line=dict(width=0.3, color='#333333')
+                                )
                             ))
                     fig_slice.update_layout(
-                        title=f"Y剖面 (Y = {slice_pos:.1f} m)",
-                        xaxis_title="X (m)",
-                        yaxis_title="Z (m)"
+                        title=dict(
+                            text=f"<b>Y Cross Section (Y = {slice_pos:.1f} m)</b>",
+                            font=dict(size=14, family="Arial", color='#333333'),
+                            x=0.5,
+                            xanchor='center'
+                        ),
+                        xaxis_title="<b>X (m)</b>",
+                        yaxis_title="<b>Z (m)</b>"
                     )
+
+                # 应用SCI样式
+                fig_slice.update_layout(
+                    legend=dict(
+                        **SCI_LEGEND,
+                        title=dict(text="<b>Lithology</b>", font=dict(size=11)),
+                        yanchor="top",
+                        y=0.98,
+                        xanchor="right",
+                        x=0.98
+                    ),
+                    height=500,
+                    **SCI_LAYOUT
+                )
+                fig_slice.update_xaxes(**SCI_AXIS)
+                fig_slice.update_yaxes(**SCI_AXIS)
 
                 st.plotly_chart(fig_slice, width="stretch")
 

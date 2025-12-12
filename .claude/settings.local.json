@@ -1,7 +1,11 @@
 {
   "permissions": {
     "allow": [
-      "Bash(mkdir:*)"
+      "Bash(mkdir:*)",
+      "Bash(cd:*)",
+      "Bash(python -m py_compile:*)",
+      "Bash(python:*)",
+      "Bash(C:UsersAdministratoranaconda3envsgeomodelpython.exe -c:*)"
     ]
   }
 }
