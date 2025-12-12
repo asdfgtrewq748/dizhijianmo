@@ -48,7 +48,17 @@ class GeoModelTrainer:
         """
         # 设备设置
         if device == 'auto':
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            if torch.cuda.is_available():
+                try:
+                    # 测试 CUDA 是否真正可用（兼容性检查）
+                    test_tensor = torch.zeros(1).cuda()
+                    del test_tensor
+                    self.device = torch.device('cuda')
+                except Exception as e:
+                    print(f"CUDA 不兼容当前 PyTorch 版本，回退到 CPU: {e}")
+                    self.device = torch.device('cpu')
+            else:
+                self.device = torch.device('cpu')
         else:
             self.device = torch.device(device)
 
@@ -69,7 +79,7 @@ class GeoModelTrainer:
         self.scheduler_type = scheduler_type
         if scheduler_type == 'plateau':
             self.scheduler = ReduceLROnPlateau(
-                self.optimizer, mode='min', factor=0.5, patience=10, verbose=True
+                self.optimizer, mode='min', factor=0.5, patience=10
             )
         elif scheduler_type == 'cosine':
             self.scheduler = CosineAnnealingLR(self.optimizer, T_max=100)

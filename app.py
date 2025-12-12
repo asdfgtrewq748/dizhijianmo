@@ -51,6 +51,25 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
+def get_color_palette(n: int) -> list:
+    """Return a palette with at least n distinct colors."""
+    base_palette = (
+        px.colors.qualitative.Dark24
+        + px.colors.qualitative.Light24
+        + px.colors.qualitative.Alphabet
+        + px.colors.qualitative.Safe
+        + px.colors.qualitative.Vivid
+        + px.colors.qualitative.Plotly
+        + px.colors.qualitative.Set3
+    )
+
+    if n <= len(base_palette):
+        return base_palette[:n]
+
+    repeats = (n + len(base_palette) - 1) // len(base_palette)
+    return (base_palette * repeats)[:n]
+
+
 # ==================== 可视化函数 ====================
 def plot_borehole_3d(df: pd.DataFrame, color_col: str = 'lithology') -> go.Figure:
     """
@@ -58,9 +77,9 @@ def plot_borehole_3d(df: pd.DataFrame, color_col: str = 'lithology') -> go.Figur
     """
     fig = go.Figure()
 
-    categories = df[color_col].unique()
-    colors = px.colors.qualitative.Set3[:len(categories)]
-    color_map = dict(zip(categories, colors))
+    categories = sorted(df[color_col].unique())
+    colors = get_color_palette(len(categories))
+    color_map = {category: colors[idx] for idx, category in enumerate(categories)}
 
     for category in categories:
         mask = df[color_col] == category
@@ -117,7 +136,7 @@ def plot_predictions_3d(
     """绘制预测结果的三维可视化"""
     fig = go.Figure()
 
-    colors = px.colors.qualitative.Set3[:len(lithology_classes)]
+    colors = get_color_palette(len(lithology_classes))
 
     for i, class_name in enumerate(lithology_classes):
         mask = predictions == i
@@ -180,9 +199,9 @@ def plot_borehole_column(df: pd.DataFrame, borehole_id: str) -> go.Figure:
     if bh_data.empty:
         return go.Figure()
 
-    lithologies = bh_data['lithology'].unique()
-    colors = px.colors.qualitative.Set3[:len(lithologies)]
-    color_map = dict(zip(lithologies, colors))
+    lithologies = sorted(bh_data['lithology'].unique())
+    colors = get_color_palette(len(lithologies))
+    color_map = {lithology: colors[idx] for idx, lithology in enumerate(lithologies)}
 
     fig = go.Figure()
 
@@ -232,7 +251,7 @@ def plot_cross_section(
     mask = np.abs(coords[:, axis_idx] - position) <= thickness / 2
 
     fig = go.Figure()
-    colors = px.colors.qualitative.Set3[:len(lithology_classes)]
+    colors = get_color_palette(len(lithology_classes))
 
     for i, class_name in enumerate(lithology_classes):
         class_mask = mask & (predictions == i)
@@ -454,13 +473,13 @@ def main():
             st.subheader("数据预览")
             st.dataframe(
                 df[['borehole_id', 'x', 'y', 'z', 'lithology', 'layer_thickness']].head(20),
-                use_container_width=True
+                width="stretch"
             )
 
             # 三维可视化
             st.subheader("钻孔分布可视化")
             fig = plot_borehole_3d(df)
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
 
             # 统计图
             col1, col2 = st.columns(2)
@@ -475,7 +494,7 @@ def main():
                     color_discrete_sequence=px.colors.qualitative.Set3
                 )
                 fig_bar.update_layout(showlegend=False)
-                st.plotly_chart(fig_bar, use_container_width=True)
+                st.plotly_chart(fig_bar, width="stretch")
 
             with col2:
                 st.subheader("深度分布")
@@ -483,7 +502,7 @@ def main():
                     df, x='z', nbins=50,
                     labels={'z': '深度 (m)', 'count': '采样点数'}
                 )
-                st.plotly_chart(fig_hist, use_container_width=True)
+                st.plotly_chart(fig_hist, width="stretch")
 
             # 单钻孔柱状图
             st.subheader("钻孔柱状图")
@@ -491,7 +510,7 @@ def main():
             selected_bh = st.selectbox("选择钻孔", borehole_ids)
             if selected_bh:
                 fig_col = plot_borehole_column(df, selected_bh)
-                st.plotly_chart(fig_col, use_container_width=True)
+                st.plotly_chart(fig_col, width="stretch")
 
     # Tab 2: 模型训练
     with tab2:
@@ -579,10 +598,10 @@ def main():
             col1, col2 = st.columns(2)
             with col1:
                 fig_loss = plot_training_history(st.session_state.history)
-                st.plotly_chart(fig_loss, use_container_width=True)
+                st.plotly_chart(fig_loss, width="stretch")
             with col2:
                 fig_acc = plot_accuracy_history(st.session_state.history)
-                st.plotly_chart(fig_acc, use_container_width=True)
+                st.plotly_chart(fig_acc, width="stretch")
 
     # Tab 3: 结果分析
     with tab3:
@@ -620,12 +639,12 @@ def main():
                 eval_results['confusion_matrix'],
                 result['lithology_classes']
             )
-            st.plotly_chart(fig_cm, use_container_width=True)
+            st.plotly_chart(fig_cm, width="stretch")
 
             # 分类报告
             st.subheader("详细分类报告")
             report_df = pd.DataFrame(eval_results['classification_report']).transpose()
-            st.dataframe(report_df, use_container_width=True)
+            st.dataframe(report_df, width="stretch")
 
     # Tab 4: 三维可视化
     with tab4:
@@ -681,7 +700,7 @@ def main():
                     show_errors=True
                 )
 
-            st.plotly_chart(fig_3d, use_container_width=True)
+            st.plotly_chart(fig_3d, width="stretch")
 
         # 剖面图
         st.subheader("剖面视图")
@@ -696,7 +715,7 @@ def main():
                 thickness=section_thickness
             )
             fig_section_pred.update_layout(title="预测剖面")
-            st.plotly_chart(fig_section_pred, use_container_width=True)
+            st.plotly_chart(fig_section_pred, width="stretch")
 
         with col2:
             fig_section_true = plot_cross_section(
@@ -707,7 +726,7 @@ def main():
                 thickness=section_thickness
             )
             fig_section_true.update_layout(title="真实剖面")
-            st.plotly_chart(fig_section_true, use_container_width=True)
+            st.plotly_chart(fig_section_true, width="stretch")
 
     # Tab 5: 地质建模
     with tab5:
@@ -767,7 +786,7 @@ def main():
             stats = st.session_state.model_stats
 
             st.subheader("岩性体积统计")
-            st.dataframe(stats, use_container_width=True)
+            st.dataframe(stats, width="stretch")
 
             # 可视化切片
             st.subheader("模型切片可视化")
@@ -795,7 +814,7 @@ def main():
                 # 绘制切片
                 fig_slice = go.Figure()
 
-                colors = px.colors.qualitative.Set3[:len(result['lithology_classes'])]
+                colors = get_color_palette(len(result['lithology_classes']))
 
                 if slice_axis == 'z':
                     for i, class_name in enumerate(result['lithology_classes']):
@@ -846,7 +865,7 @@ def main():
                         yaxis_title="Z (m)"
                     )
 
-                st.plotly_chart(fig_slice, use_container_width=True)
+                st.plotly_chart(fig_slice, width="stretch")
 
             # 导出按钮
             st.subheader("导出模型")
