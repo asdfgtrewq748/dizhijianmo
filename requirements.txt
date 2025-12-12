@@ -1,0 +1,24 @@
+# GNN三维地质建模项目依赖
+
+# 核心依赖
+torch>=2.0.0
+torch-geometric>=2.4.0
+
+# 数据处理
+numpy>=1.24.0
+pandas>=2.0.0
+scipy>=1.10.0
+scikit-learn>=1.2.0
+
+# 可视化
+plotly>=5.15.0
+streamlit>=1.28.0
+
+# 工具
+tqdm>=4.65.0
+
+# 可选: GPU加速 (根据CUDA版本选择)
+# torch-scatter
+# torch-sparse
+# torch-cluster
+# torch-spline-conv
