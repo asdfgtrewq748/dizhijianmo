@@ -5,7 +5,12 @@
       "Bash(cd:*)",
       "Bash(python -m py_compile:*)",
       "Bash(python:*)",
-      "Bash(C:UsersAdministratoranaconda3envsgeomodelpython.exe -c:*)"
+      "Bash(C:UsersAdministratoranaconda3envsgeomodelpython.exe -c:*)",
+      "WebFetch(domain:github.com)",
+      "Bash(git clone:*)",
+      "Bash(dir:*)",
+      "Bash(C:UsersAdministratoranaconda3envsgeomodelpython.exe -m py_compile app.py)",
+      "Bash(C:UsersAdministratoranaconda3envsgeomodelpython.exe -m py_compile src/modeling.py)"
     ]
   }
 }

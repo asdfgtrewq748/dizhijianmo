@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim import Adam, AdamW
-from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingLR
+from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingLR, OneCycleLR
 from torch_geometric.data import Data
 import numpy as np
 from sklearn.metrics import classification_report, confusion_matrix, f1_score
@@ -16,6 +16,59 @@ import os
 import json
 from datetime import datetime
 from tqdm import tqdm
+
+
+class FocalLoss(nn.Module):
+    """
+    Focal Loss - 专门处理类别不平衡问题
+    对于难分类的样本给予更高的权重
+    """
+    def __init__(self, alpha: Optional[torch.Tensor] = None, gamma: float = 2.0, reduction: str = 'mean'):
+        super(FocalLoss, self).__init__()
+        self.alpha = alpha  # 类别权重
+        self.gamma = gamma  # 聚焦参数
+        self.reduction = reduction
+
+    def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        ce_loss = F.cross_entropy(inputs, targets, weight=self.alpha, reduction='none')
+        pt = torch.exp(-ce_loss)
+        focal_loss = ((1 - pt) ** self.gamma) * ce_loss
+
+        if self.reduction == 'mean':
+            return focal_loss.mean()
+        elif self.reduction == 'sum':
+            return focal_loss.sum()
+        return focal_loss
+
+
+class LabelSmoothingLoss(nn.Module):
+    """
+    标签平滑损失 - 防止过拟合，提高泛化能力
+    """
+    def __init__(self, num_classes: int, smoothing: float = 0.1, weight: Optional[torch.Tensor] = None):
+        super(LabelSmoothingLoss, self).__init__()
+        self.num_classes = num_classes
+        self.smoothing = smoothing
+        self.weight = weight
+        self.confidence = 1.0 - smoothing
+
+    def forward(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        log_probs = F.log_softmax(inputs, dim=-1)
+
+        # 创建平滑标签
+        with torch.no_grad():
+            true_dist = torch.zeros_like(log_probs)
+            true_dist.fill_(self.smoothing / (self.num_classes - 1))
+            true_dist.scatter_(1, targets.unsqueeze(1), self.confidence)
+
+        # 计算损失
+        if self.weight is not None:
+            weight = self.weight[targets]
+            loss = (-true_dist * log_probs).sum(dim=-1) * weight
+        else:
+            loss = (-true_dist * log_probs).sum(dim=-1)
+
+        return loss.mean()
 
 
 class GeoModelTrainer:
@@ -30,9 +83,13 @@ class GeoModelTrainer:
         device: str = 'auto',
         learning_rate: float = 0.01,
         weight_decay: float = 5e-4,
-        optimizer_type: str = 'adam',
+        optimizer_type: str = 'adamw',
         scheduler_type: str = 'plateau',
-        class_weights: Optional[torch.Tensor] = None
+        class_weights: Optional[torch.Tensor] = None,
+        loss_type: str = 'focal',  # 'ce', 'focal', 'label_smoothing'
+        num_classes: int = None,
+        focal_gamma: float = 2.0,
+        label_smoothing: float = 0.1
     ):
         """
         初始化训练器
@@ -43,8 +100,12 @@ class GeoModelTrainer:
             learning_rate: 学习率
             weight_decay: 权重衰减 (L2正则化)
             optimizer_type: 优化器类型 ('adam', 'adamw')
-            scheduler_type: 学习率调度器类型 ('plateau', 'cosine', 'none')
+            scheduler_type: 学习率调度器类型 ('plateau', 'cosine', 'onecycle', 'none')
             class_weights: 类别权重 (用于处理类别不平衡)
+            loss_type: 损失函数类型 ('ce', 'focal', 'label_smoothing')
+            num_classes: 类别数量 (label_smoothing需要)
+            focal_gamma: Focal Loss的gamma参数
+            label_smoothing: 标签平滑系数
         """
         # 设备设置
         if device == 'auto':
@@ -67,7 +128,7 @@ class GeoModelTrainer:
         # 模型
         self.model = model.to(self.device)
 
-        # 优化器
+        # 优化器 - 使用AdamW作为默认，更好的正则化效果
         if optimizer_type == 'adam':
             self.optimizer = Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
         elif optimizer_type == 'adamw':
@@ -77,19 +138,27 @@ class GeoModelTrainer:
 
         # 学习率调度器
         self.scheduler_type = scheduler_type
+        self.learning_rate = learning_rate
         if scheduler_type == 'plateau':
             self.scheduler = ReduceLROnPlateau(
-                self.optimizer, mode='min', factor=0.5, patience=10
+                self.optimizer, mode='max', factor=0.5, patience=15, min_lr=1e-6
             )
         elif scheduler_type == 'cosine':
-            self.scheduler = CosineAnnealingLR(self.optimizer, T_max=100)
+            self.scheduler = CosineAnnealingLR(self.optimizer, T_max=100, eta_min=1e-6)
         else:
             self.scheduler = None
 
         # 损失函数
         if class_weights is not None:
             class_weights = class_weights.to(self.device)
-        self.criterion = nn.CrossEntropyLoss(weight=class_weights)
+
+        self.loss_type = loss_type
+        if loss_type == 'focal':
+            self.criterion = FocalLoss(alpha=class_weights, gamma=focal_gamma)
+        elif loss_type == 'label_smoothing' and num_classes is not None:
+            self.criterion = LabelSmoothingLoss(num_classes=num_classes, smoothing=label_smoothing, weight=class_weights)
+        else:
+            self.criterion = nn.CrossEntropyLoss(weight=class_weights)
 
         # 训练历史
         self.history = {
@@ -227,7 +296,7 @@ class GeoModelTrainer:
 
             # 更新学习率
             if self.scheduler_type == 'plateau':
-                self.scheduler.step(val_loss)
+                self.scheduler.step(val_acc)  # 使用准确率而非损失
             elif self.scheduler_type == 'cosine':
                 self.scheduler.step()
 

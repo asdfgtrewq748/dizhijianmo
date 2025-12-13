@@ -24,12 +24,12 @@ from src.modeling import GeoModel3D, build_geological_model
 
 def run_full_pipeline(
     data_dir: str = None,
-    model_type: str = 'graphsage',
-    hidden_dim: int = 64,
-    num_layers: int = 3,
-    epochs: int = 200,
-    sample_interval: float = 2.0,
-    k_neighbors: int = 10,
+    model_type: str = 'enhanced',
+    hidden_dim: int = 128,
+    num_layers: int = 4,
+    epochs: int = 300,
+    sample_interval: float = 1.0,
+    k_neighbors: int = 15,
     grid_resolution: tuple = (50, 50, 50),
     output_dir: str = 'output'
 ):
@@ -109,16 +109,19 @@ def run_full_pipeline(
     trainer = GeoModelTrainer(
         model=model,
         device='auto',
-        learning_rate=0.01,
-        weight_decay=5e-4,
-        class_weights=class_weights
+        learning_rate=0.005,
+        weight_decay=1e-4,
+        class_weights=class_weights,
+        loss_type='focal',
+        num_classes=result['num_classes'],
+        focal_gamma=2.0
     )
 
     model_path = os.path.join(output_dir, 'models', 'best_model.pt')
     history = trainer.train(
         data,
         epochs=epochs,
-        patience=30,
+        patience=50,
         verbose=True,
         save_path=model_path
     )
@@ -322,13 +325,13 @@ def main():
     # run命令 (完整流程)
     run_parser = subparsers.add_parser('run', help='完整流程: 训练 + 建模')
     run_parser.add_argument('--data', type=str, default='./data', help='数据目录')
-    run_parser.add_argument('--model', type=str, default='graphsage',
-                           choices=['gcn', 'graphsage', 'gat', 'geo3d'])
-    run_parser.add_argument('--hidden', type=int, default=64)
-    run_parser.add_argument('--layers', type=int, default=3)
-    run_parser.add_argument('--epochs', type=int, default=200)
-    run_parser.add_argument('--sample-interval', type=float, default=2.0)
-    run_parser.add_argument('--k-neighbors', type=int, default=10)
+    run_parser.add_argument('--model', type=str, default='enhanced',
+                           choices=['gcn', 'graphsage', 'gat', 'geo3d', 'enhanced'])
+    run_parser.add_argument('--hidden', type=int, default=128)
+    run_parser.add_argument('--layers', type=int, default=4)
+    run_parser.add_argument('--epochs', type=int, default=300)
+    run_parser.add_argument('--sample-interval', type=float, default=1.0)
+    run_parser.add_argument('--k-neighbors', type=int, default=15)
     run_parser.add_argument('--resolution', type=int, nargs=3, default=[50, 50, 50],
                            help='网格分辨率 (nx ny nz)')
     run_parser.add_argument('--output', type=str, default='output')
@@ -336,13 +339,13 @@ def main():
     # train命令 (仅训练)
     train_parser = subparsers.add_parser('train', help='仅训练模型')
     train_parser.add_argument('--data', type=str, default='./data')
-    train_parser.add_argument('--model', type=str, default='graphsage',
-                             choices=['gcn', 'graphsage', 'gat', 'geo3d'])
-    train_parser.add_argument('--hidden', type=int, default=64)
-    train_parser.add_argument('--layers', type=int, default=3)
-    train_parser.add_argument('--epochs', type=int, default=200)
-    train_parser.add_argument('--sample-interval', type=float, default=2.0)
-    train_parser.add_argument('--k-neighbors', type=int, default=10)
+    train_parser.add_argument('--model', type=str, default='enhanced',
+                             choices=['gcn', 'graphsage', 'gat', 'geo3d', 'enhanced'])
+    train_parser.add_argument('--hidden', type=int, default=128)
+    train_parser.add_argument('--layers', type=int, default=4)
+    train_parser.add_argument('--epochs', type=int, default=300)
+    train_parser.add_argument('--sample-interval', type=float, default=1.0)
+    train_parser.add_argument('--k-neighbors', type=int, default=15)
     train_parser.add_argument('--output', type=str, default='output')
 
     # model命令 (仅建模)

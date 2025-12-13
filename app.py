@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from src.models import get_model
 from src.data_loader import BoreholeDataProcessor, GridInterpolator
 from src.trainer import GeoModelTrainer, compute_class_weights
-from src.modeling import GeoModel3D, build_geological_model
+from src.modeling import StratigraphicModel3D, build_stratigraphic_model_from_df
 
 
 # ==================== 页面配置 ====================
@@ -144,6 +144,208 @@ def apply_sci_style(fig: go.Figure, height: int = 500) -> go.Figure:
 
 
 # ==================== 可视化函数 ====================
+def create_cylinder_mesh(x_center, y_center, z_top, z_bottom, radius, n_sides=16):
+    """
+    创建圆柱体的网格数据
+    返回用于绘制圆柱体侧面的坐标
+    """
+    theta = np.linspace(0, 2 * np.pi, n_sides + 1)
+
+    # 圆柱体侧面的坐标
+    x_circle = x_center + radius * np.cos(theta)
+    y_circle = y_center + radius * np.sin(theta)
+
+    # 创建侧面网格
+    x_surf = np.array([x_circle, x_circle])
+    y_surf = np.array([y_circle, y_circle])
+    z_surf = np.array([[z_top] * len(theta), [z_bottom] * len(theta)])
+
+    return x_surf, y_surf, z_surf
+
+
+def plot_borehole_cylinders_3d(df: pd.DataFrame, cylinder_radius: float = None) -> go.Figure:
+    """
+    绘制三维钻孔圆柱体图 - 优化版本，使用Mesh3d批量渲染
+    """
+    fig = go.Figure()
+
+    # 获取岩性类别和颜色
+    lithology_categories = sorted(df['lithology'].unique())
+    colors = get_color_palette(len(lithology_categories))
+    color_map = {category: colors[idx] for idx, category in enumerate(lithology_categories)}
+
+    # 颜色转RGB数值 - 支持多种格式
+    def color_to_rgb(color_str):
+        """将颜色字符串转换为RGB元组，支持hex和rgb()格式"""
+        if color_str.startswith('#'):
+            hex_color = color_str.lstrip('#')
+            return tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+        elif color_str.startswith('rgb'):
+            # 处理 rgb(r, g, b) 格式
+            import re
+            match = re.search(r'rgb\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)', color_str)
+            if match:
+                return tuple(int(x) for x in match.groups())
+        # 默认返回灰色
+        return (128, 128, 128)
+
+    color_map_rgb = {k: color_to_rgb(v) for k, v in color_map.items()}
+
+    # 自动计算圆柱体半径
+    if cylinder_radius is None:
+        borehole_coords = df.groupby('borehole_id')[['x', 'y']].first().values
+        if len(borehole_coords) > 1:
+            from scipy.spatial import distance
+            dists = distance.pdist(borehole_coords)
+            min_dist = np.min(dists) if len(dists) > 0 else 100
+            cylinder_radius = min_dist * 0.06
+        else:
+            cylinder_radius = 50
+
+    # 按岩性分组收集所有圆柱体数据
+    lithology_meshes = {litho: {'x': [], 'y': [], 'z': [], 'i': [], 'j': [], 'k': [], 'hover': []}
+                        for litho in lithology_categories}
+
+    n_sides = 12  # 减少面数提高性能
+    theta = np.linspace(0, 2 * np.pi, n_sides, endpoint=False)
+    cos_theta = np.cos(theta)
+    sin_theta = np.sin(theta)
+
+    boreholes = df['borehole_id'].unique()
+
+    for bh_id in boreholes:
+        bh_data = df[df['borehole_id'] == bh_id].copy()
+        x_center = bh_data['x'].iloc[0]
+        y_center = bh_data['y'].iloc[0]
+
+        # 按层序获取每层信息
+        if 'layer_order' in bh_data.columns:
+            layers = bh_data.groupby('layer_order').agg({
+                'lithology': 'first',
+                'top_depth': 'first',
+                'bottom_depth': 'first',
+                'layer_thickness': 'first'
+            }).reset_index().sort_values('layer_order')
+        else:
+            continue
+
+        # 合并相邻同岩性层以减少对象数
+        merged_layers = []
+        current_layer = None
+        for _, layer in layers.iterrows():
+            if current_layer is None:
+                current_layer = {
+                    'lithology': layer['lithology'],
+                    'top_depth': layer['top_depth'],
+                    'bottom_depth': layer['bottom_depth'],
+                    'layer_thickness': layer['layer_thickness']
+                }
+            elif current_layer['lithology'] == layer['lithology']:
+                # 合并相邻同岩性层
+                current_layer['bottom_depth'] = layer['bottom_depth']
+                current_layer['layer_thickness'] += layer['layer_thickness']
+            else:
+                merged_layers.append(current_layer)
+                current_layer = {
+                    'lithology': layer['lithology'],
+                    'top_depth': layer['top_depth'],
+                    'bottom_depth': layer['bottom_depth'],
+                    'layer_thickness': layer['layer_thickness']
+                }
+        if current_layer:
+            merged_layers.append(current_layer)
+
+        # 为每层添加圆柱体网格数据
+        for layer in merged_layers:
+            lithology = layer['lithology']
+            z_top = -layer['top_depth']
+            z_bottom = -layer['bottom_depth']
+
+            mesh_data = lithology_meshes[lithology]
+            base_idx = len(mesh_data['x'])
+
+            # 添加顶部和底部圆的顶点
+            for z_val in [z_top, z_bottom]:
+                for ci, si in zip(cos_theta, sin_theta):
+                    mesh_data['x'].append(x_center + cylinder_radius * ci)
+                    mesh_data['y'].append(y_center + cylinder_radius * si)
+                    mesh_data['z'].append(z_val)
+
+            # 添加侧面三角形
+            for idx in range(n_sides):
+                next_idx = (idx + 1) % n_sides
+                # 顶部索引
+                t1, t2 = base_idx + idx, base_idx + next_idx
+                # 底部索引
+                b1, b2 = base_idx + n_sides + idx, base_idx + n_sides + next_idx
+                # 两个三角形组成一个侧面
+                mesh_data['i'].extend([t1, t1])
+                mesh_data['j'].extend([t2, b1])
+                mesh_data['k'].extend([b1, b2])
+
+    # 为每种岩性创建一个Mesh3d
+    for lithology in lithology_categories:
+        mesh_data = lithology_meshes[lithology]
+        if not mesh_data['x']:
+            continue
+
+        rgb = color_map_rgb[lithology]
+        fig.add_trace(go.Mesh3d(
+            x=mesh_data['x'],
+            y=mesh_data['y'],
+            z=mesh_data['z'],
+            i=mesh_data['i'],
+            j=mesh_data['j'],
+            k=mesh_data['k'],
+            color=f'rgb({rgb[0]},{rgb[1]},{rgb[2]})',
+            opacity=0.9,
+            name=lithology,
+            showlegend=True,
+            flatshading=True,
+            lighting=dict(ambient=0.7, diffuse=0.8, specular=0.2, roughness=0.5),
+            lightposition=dict(x=1000, y=1000, z=1000),
+            hoverinfo='name'
+        ))
+
+    # 3D场景配置
+    scene_axis = dict(
+        backgroundcolor='#F8F9FA',
+        gridcolor='#DEE2E6',
+        gridwidth=1,
+        showbackground=True,
+        linecolor='#495057',
+        linewidth=2,
+        tickfont=dict(size=10, family="Arial"),
+        title_font=dict(size=12, family="Arial", color='#212529'),
+    )
+
+    fig.update_layout(
+        title=dict(
+            text="<b>3D Borehole Stratigraphic Model</b>",
+            font=dict(size=16, family="Arial", color='#212529'),
+            x=0.5, xanchor='center'
+        ),
+        scene=dict(
+            xaxis=dict(**scene_axis, title="<b>X (m)</b>"),
+            yaxis=dict(**scene_axis, title="<b>Y (m)</b>"),
+            zaxis=dict(**scene_axis, title="<b>Elevation (m)</b>"),
+            aspectmode='data',
+            camera=dict(eye=dict(x=1.8, y=1.8, z=1.0), up=dict(x=0, y=0, z=1))
+        ),
+        legend=dict(
+            **SCI_LEGEND,
+            title=dict(text="<b>Lithology</b>", font=dict(size=12)),
+            yanchor="top", y=0.98, xanchor="left", x=0.02,
+            itemsizing='constant'
+        ),
+        paper_bgcolor='white',
+        margin=dict(l=0, r=0, t=60, b=0),
+        height=700
+    )
+
+    return fig
+
+
 def plot_borehole_3d(df: pd.DataFrame, color_col: str = 'lithology') -> go.Figure:
     """
     绘制三维钻孔散点图 - SCI论文质量
@@ -652,24 +854,24 @@ def main():
         # 图构建设置
         st.subheader("🔗 图构建")
         graph_type = st.selectbox("图类型", ['knn', 'radius', 'delaunay'])
-        k_neighbors = st.slider("K邻居数", 3, 20, 10)
+        k_neighbors = st.slider("K邻居数", 5, 25, 15)
 
         # 模型设置
         st.subheader("🧠 模型配置")
-        model_type = st.selectbox("模型类型", ['graphsage', 'gcn', 'gat', 'geo3d'])
-        hidden_dim = st.selectbox("隐藏层维度", [32, 64, 128, 256], index=1)
-        num_layers = st.slider("GNN层数", 2, 5, 3)
-        dropout = st.slider("Dropout", 0.0, 0.8, 0.5)
+        model_type = st.selectbox("模型类型", ['enhanced', 'graphsage', 'gcn', 'gat', 'geo3d'])
+        hidden_dim = st.selectbox("隐藏层维度", [64, 128, 256], index=1)
+        num_layers = st.slider("GNN层数", 2, 6, 4)
+        dropout = st.slider("Dropout", 0.0, 0.5, 0.3)
 
         # 训练设置
         st.subheader("🎯 训练配置")
         learning_rate = st.select_slider(
             "学习率",
-            options=[0.001, 0.005, 0.01, 0.05, 0.1],
-            value=0.01
+            options=[0.001, 0.005, 0.01, 0.02],
+            value=0.005
         )
-        epochs = st.slider("训练轮数", 50, 500, 200)
-        patience = st.slider("早停耐心值", 10, 50, 30)
+        epochs = st.slider("训练轮数", 100, 500, 300)
+        patience = st.slider("早停耐心值", 20, 80, 50)
 
     # 主区域
     tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 数据探索", "🚀 模型训练", "📈 结果分析", "🗺️ 三维可视化", "🏗️ 地质建模"])
@@ -759,8 +961,38 @@ def main():
 
             # 三维可视化
             st.subheader("钻孔分布可视化")
-            fig = plot_borehole_3d(df)
-            st.plotly_chart(fig, width="stretch")
+
+            # 可视化方式选择
+            vis_col1, vis_col2 = st.columns([1, 3])
+            with vis_col1:
+                vis_mode = st.radio(
+                    "显示模式",
+                    ["🔘 散点模式", "🧱 圆柱体模式"],
+                    index=1,
+                    help="圆柱体模式更直观地展示每个钻孔的地层结构"
+                )
+                if "圆柱体" in vis_mode:
+                    cylinder_scale = st.slider("圆柱体大小", 0.5, 2.0, 1.0, 0.1,
+                                               help="调整圆柱体的相对大小")
+
+            with vis_col2:
+                if "圆柱体" in vis_mode:
+                    # 计算基础半径
+                    borehole_coords = df.groupby('borehole_id')[['x', 'y']].first().values
+                    if len(borehole_coords) > 1:
+                        from scipy.spatial import distance
+                        dists = distance.pdist(borehole_coords)
+                        min_dist = np.min(dists) if len(dists) > 0 else 100
+                        base_radius = min_dist * 0.08
+                    else:
+                        base_radius = 50
+                    adjusted_radius = base_radius * cylinder_scale
+
+                    fig = plot_borehole_cylinders_3d(df, cylinder_radius=adjusted_radius)
+                else:
+                    fig = plot_borehole_3d(df)
+
+                st.plotly_chart(fig, use_container_width=True)
 
             # 统计图
             col1, col2 = st.columns(2)
@@ -881,11 +1113,14 @@ def main():
                 # 类别权重
                 class_weights = compute_class_weights(data.y) if use_class_weights else None
 
-                # 创建训练器
+                # 创建训练器 - 使用Focal Loss
                 trainer = GeoModelTrainer(
                     model=model,
                     learning_rate=learning_rate,
-                    class_weights=class_weights
+                    class_weights=class_weights,
+                    loss_type='focal',
+                    num_classes=result['num_classes'],
+                    focal_gamma=2.0
                 )
 
                 # 训练进度
@@ -1079,26 +1314,21 @@ def main():
             ny = st.slider("Y方向网格数", 20, 100, 50)
             nz = st.slider("Z方向网格数", 20, 100, 40)
 
-            interp_method = st.selectbox("插值方法", ['knn', 'idw', 'nearest'])
-            k_interp = st.slider("插值邻居数", 3, 15, 8)
+            interp_method = st.selectbox("插值方法", ['rbf', 'idw', 'linear'],
+                                          help="RBF(径向基函数)插值效果最好")
 
         with col2:
             if st.button("🏗️ 构建三维地质模型", type="primary"):
-                with st.spinner("正在构建三维地质模型..."):
-                    # 创建模型
-                    geo_model = GeoModel3D(
+                with st.spinner("正在构建层状三维地质模型..."):
+                    # 创建层状地质模型
+                    geo_model = StratigraphicModel3D(
                         resolution=(nx, ny, nz),
                         interpolation_method=interp_method,
-                        k_neighbors=k_interp
+                        smoothing=0.1
                     )
 
-                    coords = data.coords.cpu().numpy()
-                    confidence = probs.max(axis=1)
-
-                    # 构建网格并插值
-                    geo_model.build_grid(coords)
-                    geo_model.interpolate_lithology(coords, predictions, confidence)
-                    geo_model.lithology_classes = result['lithology_classes']
+                    # 使用原始钻孔数据构建层状模型
+                    geo_model.build_stratigraphic_model(st.session_state.df, result['lithology_classes'])
 
                     st.session_state.geo_model = geo_model
 
@@ -1106,7 +1336,7 @@ def main():
                     stats = geo_model.get_statistics(result['lithology_classes'])
                     st.session_state.model_stats = stats
 
-                    st.success(f"✅ 模型构建完成! 共 {nx*ny*nz:,} 个体素")
+                    st.success(f"✅ 层状地质模型构建完成! 共 {nx*ny*nz:,} 个体素")
 
         # 显示模型信息和统计
         if 'geo_model' in st.session_state:
@@ -1240,6 +1470,135 @@ def main():
                 fig_slice.update_yaxes(**SCI_AXIS)
 
                 st.plotly_chart(fig_slice, width="stretch")
+
+            # ==================== 三维地质体模型可视化 ====================
+            st.subheader("三维地质体模型")
+
+            vis_col1, vis_col2 = st.columns([1, 3])
+
+            with vis_col1:
+                st.write("**显示设置**")
+                opacity_3d = st.slider("透明度", 0.1, 1.0, 0.8, key='opacity_3d')
+                show_all_layers = st.checkbox("显示所有岩层", value=True)
+
+                if not show_all_layers:
+                    selected_lithologies = st.multiselect(
+                        "选择显示的岩性",
+                        result['lithology_classes'],
+                        default=result['lithology_classes'][:3] if len(result['lithology_classes']) > 3 else result['lithology_classes']
+                    )
+                else:
+                    selected_lithologies = result['lithology_classes']
+
+                surface_count = st.slider("曲面精细度", 1, 3, 2, help="值越大曲面越精细，但渲染越慢")
+
+            with vis_col2:
+                # 创建三维等值面可视化
+                fig_3d_model = go.Figure()
+
+                lithology_3d, confidence_3d = geo_model.get_voxel_model()
+                colors = get_color_palette(len(result['lithology_classes']))
+
+                # 获取网格信息
+                x_grid = geo_model.grid_info['x_grid']
+                y_grid = geo_model.grid_info['y_grid']
+                z_grid = geo_model.grid_info['z_grid']
+
+                # 颜色转换函数
+                def color_to_rgb(color_str):
+                    if color_str.startswith('#'):
+                        hex_color = color_str.lstrip('#')
+                        return tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+                    elif color_str.startswith('rgb'):
+                        import re
+                        match = re.search(r'rgb\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)', color_str)
+                        if match:
+                            return tuple(int(x) for x in match.groups())
+                    return (128, 128, 128)
+
+                # 使用 Isosurface 为每种岩性创建连续曲面
+                # 先构建正确的坐标网格
+                nx, ny, nz = len(x_grid), len(y_grid), len(z_grid)
+                X, Y, Z = np.meshgrid(x_grid, y_grid, z_grid, indexing='ij')
+
+                for i, class_name in enumerate(result['lithology_classes']):
+                    if class_name not in selected_lithologies:
+                        continue
+
+                    # 创建该岩性的二值场（1表示该岩性，0表示其他）
+                    binary_field = (lithology_3d == i).astype(float)
+
+                    # 如果该岩性不存在，跳过
+                    if binary_field.sum() == 0:
+                        continue
+
+                    # 对二值场进行轻微平滑以获得更好的等值面
+                    from scipy.ndimage import gaussian_filter
+                    smoothed_field = gaussian_filter(binary_field, sigma=0.8)
+
+                    rgb = color_to_rgb(colors[i])
+
+                    # 使用Isosurface绘制等值面
+                    fig_3d_model.add_trace(go.Isosurface(
+                        x=X.flatten(),
+                        y=Y.flatten(),
+                        z=Z.flatten(),
+                        value=smoothed_field.flatten(),
+                        isomin=0.3,
+                        isomax=0.7,
+                        surface_count=surface_count,
+                        colorscale=[[0, f'rgb({rgb[0]},{rgb[1]},{rgb[2]})'],
+                                   [1, f'rgb({rgb[0]},{rgb[1]},{rgb[2]})']],
+                        showscale=False,
+                        opacity=opacity_3d,
+                        name=class_name,
+                        showlegend=True,
+                        caps=dict(x_show=True, y_show=True, z_show=True),
+                        lighting=dict(ambient=0.6, diffuse=0.8, specular=0.2, roughness=0.5),
+                        lightposition=dict(x=1000, y=1000, z=500)
+                    ))
+
+                # 设置3D场景
+                scene_axis = dict(
+                    backgroundcolor='#FAFAFA',
+                    gridcolor='#E0E0E0',
+                    gridwidth=1,
+                    showbackground=True,
+                    linecolor='#333333',
+                    linewidth=2,
+                    tickfont=dict(size=10, family="Arial"),
+                    title_font=dict(size=12, family="Arial"),
+                )
+
+                fig_3d_model.update_layout(
+                    title=dict(
+                        text="<b>3D Geological Model (Voxel Visualization)</b>",
+                        font=dict(size=14, family="Arial", color='#333333'),
+                        x=0.5,
+                        xanchor='center'
+                    ),
+                    scene=dict(
+                        xaxis=dict(**scene_axis, title="X (m)"),
+                        yaxis=dict(**scene_axis, title="Y (m)"),
+                        zaxis=dict(**scene_axis, title="Depth (m)"),
+                        aspectmode='data',
+                        camera=dict(eye=dict(x=1.5, y=1.5, z=1.2))
+                    ),
+                    legend=dict(
+                        **SCI_LEGEND,
+                        title=dict(text="<b>Lithology</b>", font=dict(size=11)),
+                        yanchor="top",
+                        y=0.95,
+                        xanchor="left",
+                        x=0.02,
+                        itemsizing='constant'
+                    ),
+                    paper_bgcolor='white',
+                    margin=dict(l=0, r=0, t=50, b=0),
+                    height=700
+                )
+
+                st.plotly_chart(fig_3d_model, use_container_width=True)
 
             # 导出按钮
             st.subheader("导出模型")

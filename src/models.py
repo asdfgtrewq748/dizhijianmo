@@ -328,12 +328,139 @@ class Geo3DGNN(nn.Module):
         return torch.argmax(logits, dim=1)
 
 
+class EnhancedGeoGNN(nn.Module):
+    """
+    增强版地质GNN模型
+    特点：
+    1. 深度残差连接
+    2. 多头注意力机制
+    3. 深度特征编码
+    4. 层次化特征聚合
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        hidden_channels: int = 128,
+        out_channels: int = 10,
+        num_layers: int = 4,
+        dropout: float = 0.3,
+        heads: int = 4
+    ):
+        super(EnhancedGeoGNN, self).__init__()
+
+        self.dropout = dropout
+        self.num_layers = num_layers
+
+        # 深度空间编码器
+        self.spatial_encoder = nn.Sequential(
+            nn.Linear(3, hidden_channels // 2),
+            nn.LayerNorm(hidden_channels // 2),
+            nn.GELU(),
+            nn.Linear(hidden_channels // 2, hidden_channels),
+            nn.LayerNorm(hidden_channels),
+            nn.GELU(),
+        )
+
+        # 特征编码器
+        feature_dim = max(in_channels - 3, 1)
+        self.feature_encoder = nn.Sequential(
+            nn.Linear(feature_dim, hidden_channels // 2),
+            nn.LayerNorm(hidden_channels // 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_channels // 2, hidden_channels),
+            nn.LayerNorm(hidden_channels),
+        )
+
+        # 特征融合
+        self.fusion_layer = nn.Sequential(
+            nn.Linear(hidden_channels * 2, hidden_channels),
+            nn.LayerNorm(hidden_channels),
+            nn.GELU(),
+        )
+
+        # 图注意力层 (多层)
+        self.gat_layers = nn.ModuleList()
+        self.layer_norms = nn.ModuleList()
+
+        for i in range(num_layers):
+            if i == 0:
+                self.gat_layers.append(
+                    GATConv(hidden_channels, hidden_channels // heads, heads=heads, dropout=dropout, concat=True)
+                )
+            else:
+                self.gat_layers.append(
+                    GATConv(hidden_channels, hidden_channels // heads, heads=heads, dropout=dropout, concat=True)
+                )
+            self.layer_norms.append(nn.LayerNorm(hidden_channels))
+
+        # 残差投影层
+        self.residual_proj = nn.Linear(hidden_channels, hidden_channels)
+
+        # 层次化聚合
+        self.layer_weights = nn.Parameter(torch.ones(num_layers) / num_layers)
+
+        # 分类头
+        self.classifier = nn.Sequential(
+            nn.Linear(hidden_channels, hidden_channels),
+            nn.LayerNorm(hidden_channels),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_channels, hidden_channels // 2),
+            nn.LayerNorm(hidden_channels // 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_channels // 2, out_channels)
+        )
+
+        self.in_channels = in_channels
+
+    def forward(self, x: torch.Tensor, edge_index: torch.Tensor,
+                edge_weight: Optional[torch.Tensor] = None) -> torch.Tensor:
+        # 分离坐标和特征
+        coords = x[:, :3]
+        features = x[:, 3:] if x.shape[1] > 3 else torch.zeros(x.shape[0], 1, device=x.device)
+
+        # 编码
+        spatial_feat = self.spatial_encoder(coords)
+        other_feat = self.feature_encoder(features)
+
+        # 融合
+        h = self.fusion_layer(torch.cat([spatial_feat, other_feat], dim=1))
+
+        # 多层GAT with 残差连接和层次聚合
+        layer_outputs = []
+        for i in range(self.num_layers):
+            h_new = self.gat_layers[i](h, edge_index)
+            h_new = self.layer_norms[i](h_new)
+            h_new = F.gelu(h_new)
+            h_new = F.dropout(h_new, p=self.dropout, training=self.training)
+
+            # 残差连接
+            h = h + self.residual_proj(h_new) if i > 0 else h_new
+            layer_outputs.append(h)
+
+        # 层次化聚合
+        weights = F.softmax(self.layer_weights, dim=0)
+        h_final = sum(w * out for w, out in zip(weights, layer_outputs))
+
+        # 分类
+        out = self.classifier(h_final)
+        return out
+
+    def predict(self, x: torch.Tensor, edge_index: torch.Tensor,
+                edge_weight: Optional[torch.Tensor] = None) -> torch.Tensor:
+        logits = self.forward(x, edge_index, edge_weight)
+        return torch.argmax(logits, dim=1)
+
+
 def get_model(model_name: str, **kwargs) -> nn.Module:
     """
     模型工厂函数
 
     Args:
-        model_name: 模型名称 ('gcn', 'graphsage', 'gat', 'geo3d')
+        model_name: 模型名称 ('gcn', 'graphsage', 'gat', 'geo3d', 'enhanced')
         **kwargs: 模型参数
 
     Returns:
@@ -343,7 +470,8 @@ def get_model(model_name: str, **kwargs) -> nn.Module:
         'gcn': GeoGCN,
         'graphsage': GeoGraphSAGE,
         'gat': GeoGAT,
-        'geo3d': Geo3DGNN
+        'geo3d': Geo3DGNN,
+        'enhanced': EnhancedGeoGNN
     }
 
     if model_name.lower() not in models:

@@ -139,9 +139,9 @@ class BoreholeDataProcessor:
             return pd.DataFrame()
 
         # 按序号排序 (如果有的话), 确保从地表向下
+        # CSV中序号1是地表层（如腐殖土），序号越大越深
         if 'layer_id' in df.columns:
-            # 序号大的在前面（靠近地表），需要反转
-            df = df.sort_values('layer_id', ascending=False).reset_index(drop=True)
+            df = df.sort_values('layer_id', ascending=True).reset_index(drop=True)
 
         # 为每一层添加序号（从地表向下），用于保留层序信息
         df['layer_order'] = np.arange(len(df))
@@ -190,6 +190,8 @@ class BoreholeDataProcessor:
                     'bottom_depth': row['bottom_depth'],
                     'center_depth': row['center_depth'],
                     'layer_thickness': row['thickness'],
+                    'relative_depth': z_depth / (row['bottom_depth'] + 0.01),  # 相对深度位置
+                    'depth_ratio': (z_depth - row['top_depth']) / (row['thickness'] + 0.01),  # 层内位置
                     'elastic_modulus': elastic_modulus,
                     'density': density,
                     'tensile_strength': tensile_strength

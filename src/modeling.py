@@ -1,97 +1,128 @@
 """
 三维地质建模模块
-将稀疏钻孔预测结果插值到规则三维网格，生成完整地质体模型
+基于层面插值方法构建真实的层状地质模型
 """
 
 import numpy as np
 import pandas as pd
 import torch
 from scipy.spatial import KDTree
-from scipy.interpolate import NearestNDInterpolator, LinearNDInterpolator
+from scipy.interpolate import NearestNDInterpolator, LinearNDInterpolator, RBFInterpolator
+from scipy.ndimage import gaussian_filter
 from typing import Tuple, Dict, List, Optional
 import os
 import json
 
 
-class GeoModel3D:
+class StratigraphicModel3D:
     """
-    三维地质模型
-    基于GNN预测结果构建完整的三维地质体
+    层状三维地质模型
+    基于层面插值方法，正确模拟真实的层状地质结构
+
+    原理：
+    1. 从钻孔数据中提取每个地层的顶底界面深度
+    2. 对每个地层界面进行空间插值（RBF/IDW）
+    3. 根据界面位置判断三维网格中每个点属于哪一层
     """
 
     def __init__(
         self,
-        resolution: Tuple[int, int, int] = (50, 50, 50),  # 网格分辨率
-        bounds: Optional[Dict] = None,  # 模型边界
-        interpolation_method: str = 'knn',  # 插值方法: 'knn', 'nearest', 'idw'
-        k_neighbors: int = 5  # KNN插值的邻居数
+        resolution: Tuple[int, int, int] = (50, 50, 50),
+        bounds: Optional[Dict] = None,
+        interpolation_method: str = 'rbf',  # 'rbf', 'idw', 'linear'
+        smoothing: float = 0.1  # RBF平滑参数
     ):
         self.resolution = resolution
         self.bounds = bounds
         self.interpolation_method = interpolation_method
-        self.k_neighbors = k_neighbors
+        self.smoothing = smoothing
 
         # 模型数据
-        self.grid_points = None      # 网格点坐标 [M, 3]
-        self.grid_lithology = None   # 网格点岩性 [M]
-        self.grid_confidence = None  # 网格点置信度 [M]
-        self.grid_shape = None       # 网格形状 (nx, ny, nz)
+        self.grid_points = None
+        self.grid_lithology = None
+        self.grid_confidence = None
+        self.grid_shape = None
         self.lithology_classes = []
+        self.layer_interfaces = {}  # 存储每层的顶底界面插值结果
         self.grid_info = {}
 
-    def build_grid(
-        self,
-        borehole_coords: np.ndarray,
-        padding: float = 0.1  # 边界扩展比例
-    ) -> np.ndarray:
+    def extract_layer_interfaces(self, df: pd.DataFrame) -> Dict:
         """
-        构建三维规则网格
+        从钻孔数据中提取地层界面信息
 
         Args:
-            borehole_coords: 钻孔点坐标 [N, 3]
-            padding: 边界扩展比例
+            df: 包含钻孔数据的DataFrame
 
         Returns:
-            grid_points: 网格点坐标 [M, 3]
+            layer_data: 字典，包含每层的界面数据
         """
-        # 确定边界
-        if self.bounds is None:
-            x_min, x_max = borehole_coords[:, 0].min(), borehole_coords[:, 0].max()
-            y_min, y_max = borehole_coords[:, 1].min(), borehole_coords[:, 1].max()
-            z_min, z_max = borehole_coords[:, 2].min(), borehole_coords[:, 2].max()
+        layer_data = {}
 
-            # 添加padding
-            x_range = x_max - x_min
-            y_range = y_max - y_min
-            z_range = z_max - z_min
+        for bh_id in df['borehole_id'].unique():
+            bh_data = df[df['borehole_id'] == bh_id]
+            x = bh_data['x'].iloc[0]
+            y = bh_data['y'].iloc[0]
 
-            x_min -= x_range * padding
-            x_max += x_range * padding
-            y_min -= y_range * padding
-            y_max += y_range * padding
-            # z方向通常不扩展（地表和底部有物理意义）
+            # 获取该钻孔的所有地层（按层序排列）
+            if 'layer_order' in bh_data.columns:
+                layers = bh_data.groupby('layer_order').agg({
+                    'lithology': 'first',
+                    'top_depth': 'first',
+                    'bottom_depth': 'first'
+                }).reset_index().sort_values('layer_order')
+            else:
+                continue
 
-            self.bounds = {
-                'x': (x_min, x_max),
-                'y': (y_min, y_max),
-                'z': (z_min, z_max)
-            }
-        else:
-            x_min, x_max = self.bounds['x']
-            y_min, y_max = self.bounds['y']
-            z_min, z_max = self.bounds['z']
+            # 记录每层的顶底深度
+            for _, layer in layers.iterrows():
+                layer_order = int(layer['layer_order'])
+                lithology = layer['lithology']
+                top_depth = layer['top_depth']
+                bottom_depth = layer['bottom_depth']
 
-        # 创建网格
+                if layer_order not in layer_data:
+                    layer_data[layer_order] = {
+                        'lithology': lithology,
+                        'points': [],
+                    }
+
+                layer_data[layer_order]['points'].append({
+                    'x': x,
+                    'y': y,
+                    'top_depth': top_depth,
+                    'bottom_depth': bottom_depth,
+                    'borehole_id': bh_id
+                })
+
+        return layer_data
+
+    def build_grid(self, df: pd.DataFrame, padding: float = 0.05):
+        """根据钻孔数据范围构建三维网格"""
+        x_min, x_max = df['x'].min(), df['x'].max()
+        y_min, y_max = df['y'].min(), df['y'].max()
+        z_min = -df['bottom_depth'].max()
+        z_max = -df['top_depth'].min()
+
+        x_range = x_max - x_min
+        y_range = y_max - y_min
+
+        x_min -= x_range * padding
+        x_max += x_range * padding
+        y_min -= y_range * padding
+        y_max += y_range * padding
+
+        self.bounds = {
+            'x': (x_min, x_max),
+            'y': (y_min, y_max),
+            'z': (z_min, z_max)
+        }
+
         nx, ny, nz = self.resolution
         x_grid = np.linspace(x_min, x_max, nx)
         y_grid = np.linspace(y_min, y_max, ny)
         z_grid = np.linspace(z_min, z_max, nz)
 
-        # 生成所有网格点
-        xx, yy, zz = np.meshgrid(x_grid, y_grid, z_grid, indexing='ij')
-        self.grid_points = np.column_stack([xx.ravel(), yy.ravel(), zz.ravel()])
         self.grid_shape = (nx, ny, nz)
-
         self.grid_info = {
             'resolution': self.resolution,
             'bounds': self.bounds,
@@ -112,174 +143,158 @@ class GeoModel3D:
         print(f"  Y范围: {y_min:.1f} ~ {y_max:.1f} m")
         print(f"  Z范围: {z_min:.1f} ~ {z_max:.1f} m")
 
-        return self.grid_points
+    def interpolate_interface(self, points: List[Dict], grid_x: np.ndarray,
+                              grid_y: np.ndarray, depth_key: str) -> np.ndarray:
+        """对单个地层界面进行空间插值"""
+        xy = np.array([[p['x'], p['y']] for p in points])
+        z = np.array([p[depth_key] for p in points])
 
-    def interpolate_lithology(
-        self,
-        borehole_coords: np.ndarray,
-        borehole_lithology: np.ndarray,
-        borehole_confidence: Optional[np.ndarray] = None
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        将钻孔岩性插值到网格点
+        XX, YY = np.meshgrid(grid_x, grid_y, indexing='ij')
+        grid_points = np.column_stack([XX.ravel(), YY.ravel()])
 
-        Args:
-            borehole_coords: 钻孔点坐标 [N, 3]
-            borehole_lithology: 钻孔点岩性标签 [N]
-            borehole_confidence: 钻孔点置信度 [N] (可选)
-
-        Returns:
-            grid_lithology: 网格点岩性 [M]
-            grid_confidence: 网格点置信度 [M]
-        """
-        if self.grid_points is None:
-            self.build_grid(borehole_coords)
-
-        print(f"插值方法: {self.interpolation_method}")
-        print(f"钻孔点数: {len(borehole_coords)}, 网格点数: {len(self.grid_points)}")
-
-        if self.interpolation_method == 'knn':
-            # KNN加权插值
-            self.grid_lithology, self.grid_confidence = self._knn_interpolate(
-                borehole_coords, borehole_lithology, borehole_confidence
-            )
-
-        elif self.interpolation_method == 'nearest':
-            # 最近邻插值
-            interpolator = NearestNDInterpolator(borehole_coords, borehole_lithology)
-            self.grid_lithology = interpolator(self.grid_points).astype(int)
-
-            if borehole_confidence is not None:
-                conf_interpolator = NearestNDInterpolator(borehole_coords, borehole_confidence)
-                self.grid_confidence = conf_interpolator(self.grid_points)
-            else:
-                # 基于距离计算置信度
-                tree = KDTree(borehole_coords)
-                distances, _ = tree.query(self.grid_points, k=1)
-                max_dist = distances.max()
-                self.grid_confidence = 1.0 - (distances / max_dist)
+        if self.interpolation_method == 'rbf':
+            try:
+                interpolator = RBFInterpolator(xy, z, smoothing=self.smoothing, kernel='thin_plate_spline')
+                interpolated = interpolator(grid_points).reshape(XX.shape)
+            except Exception as e:
+                print(f"RBF插值失败，使用线性插值: {e}")
+                interpolator = LinearNDInterpolator(xy, z, fill_value=np.mean(z))
+                interpolated = interpolator(grid_points).reshape(XX.shape)
 
         elif self.interpolation_method == 'idw':
-            # 反距离加权插值
-            self.grid_lithology, self.grid_confidence = self._idw_interpolate(
-                borehole_coords, borehole_lithology, borehole_confidence
-            )
+            tree = KDTree(xy)
+            distances, indices = tree.query(grid_points, k=min(len(points), 8))
+            distances = np.maximum(distances, 1e-10)
+            weights = 1.0 / distances ** 2
+            weights /= weights.sum(axis=1, keepdims=True)
+            interpolated = (weights * z[indices]).sum(axis=1).reshape(XX.shape)
+
+        elif self.interpolation_method == 'linear':
+            interpolator = LinearNDInterpolator(xy, z, fill_value=np.mean(z))
+            interpolated = interpolator(grid_points).reshape(XX.shape)
 
         else:
-            raise ValueError(f"未知插值方法: {self.interpolation_method}")
+            interpolator = NearestNDInterpolator(xy, z)
+            interpolated = interpolator(grid_points).reshape(XX.shape)
 
-        return self.grid_lithology, self.grid_confidence
+        return interpolated
 
-    def _knn_interpolate(
-        self,
-        coords: np.ndarray,
-        labels: np.ndarray,
-        confidence: Optional[np.ndarray] = None,
-        power: float = 2.0
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        KNN加权投票插值
+    def build_stratigraphic_model(self, df: pd.DataFrame, lithology_classes: List[str]):
+        """构建层状地质模型"""
+        print("\n" + "=" * 60)
+        print("构建层状三维地质模型")
+        print("=" * 60)
 
-        对于每个网格点，找K个最近的钻孔点，
-        根据距离加权投票决定岩性
-        """
-        tree = KDTree(coords)
-        distances, indices = tree.query(self.grid_points, k=self.k_neighbors)
+        self.lithology_classes = lithology_classes
 
-        num_classes = int(labels.max()) + 1
-        grid_labels = np.zeros(len(self.grid_points), dtype=int)
-        grid_conf = np.zeros(len(self.grid_points))
+        # 1. 构建网格
+        print("\n[1/4] 构建三维网格...")
+        self.build_grid(df)
 
-        for i in range(len(self.grid_points)):
-            # 距离权重 (反距离)
-            dists = distances[i]
-            dists = np.maximum(dists, 1e-10)  # 避免除零
-            weights = 1.0 / (dists ** power)
-            weights /= weights.sum()
+        # 2. 提取地层界面
+        print("\n[2/4] 提取地层界面...")
+        layer_data = self.extract_layer_interfaces(df)
+        print(f"  共识别 {len(layer_data)} 个地层")
 
-            # 加权投票
-            neighbor_labels = labels[indices[i]]
-            votes = np.zeros(num_classes)
-            for j, lbl in enumerate(neighbor_labels):
-                votes[lbl] += weights[j]
+        # 3. 对每个界面进行插值
+        print("\n[3/4] 插值地层界面...")
+        x_grid = self.grid_info['x_grid']
+        y_grid = self.grid_info['y_grid']
+        z_grid = self.grid_info['z_grid']
+        nx, ny, nz = self.grid_shape
 
-            grid_labels[i] = np.argmax(votes)
-            grid_conf[i] = votes[grid_labels[i]]  # 置信度 = 最高票数
+        sorted_layers = sorted(layer_data.keys())
+        interface_tops = {}
+        interface_bottoms = {}
+        layer_lithology = {}
 
-        return grid_labels, grid_conf
+        for layer_order in sorted_layers:
+            data = layer_data[layer_order]
+            points = data['points']
+            lithology = data['lithology']
 
-    def _idw_interpolate(
-        self,
-        coords: np.ndarray,
-        labels: np.ndarray,
-        confidence: Optional[np.ndarray] = None,
-        power: float = 2.0
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        反距离加权插值 (IDW)
-        """
-        tree = KDTree(coords)
+            if len(points) < 3:
+                print(f"  第 {layer_order} 层 ({lithology}) 控制点不足，跳过")
+                continue
 
-        # 使用更多邻居进行IDW
-        k = min(15, len(coords))
-        distances, indices = tree.query(self.grid_points, k=k)
+            top_interface = self.interpolate_interface(points, x_grid, y_grid, 'top_depth')
+            bottom_interface = self.interpolate_interface(points, x_grid, y_grid, 'bottom_depth')
 
-        num_classes = int(labels.max()) + 1
-        grid_labels = np.zeros(len(self.grid_points), dtype=int)
-        grid_conf = np.zeros(len(self.grid_points))
+            interface_tops[layer_order] = top_interface
+            interface_bottoms[layer_order] = bottom_interface
+            layer_lithology[layer_order] = lithology
 
-        for i in range(len(self.grid_points)):
-            dists = distances[i]
-            dists = np.maximum(dists, 1e-10)
-            weights = 1.0 / (dists ** power)
-            weights /= weights.sum()
+            print(f"  第 {layer_order} 层: {lithology} (控制点: {len(points)})")
 
-            neighbor_labels = labels[indices[i]]
-            votes = np.zeros(num_classes)
-            for j, lbl in enumerate(neighbor_labels):
-                votes[lbl] += weights[j]
+        # 4. 根据界面位置确定每个体素的岩性
+        print("\n[4/4] 填充三维模型...")
 
-            grid_labels[i] = np.argmax(votes)
-            grid_conf[i] = votes[grid_labels[i]]
+        lithology_3d = np.full((nx, ny, nz), -1, dtype=int)
+        confidence_3d = np.zeros((nx, ny, nz))
 
-        return grid_labels, grid_conf
+        litho_to_idx = {litho: idx for idx, litho in enumerate(lithology_classes)}
+
+        for i in range(nx):
+            for j in range(ny):
+                for layer_order in sorted_layers:
+                    if layer_order not in interface_tops:
+                        continue
+
+                    top_depth = interface_tops[layer_order][i, j]
+                    bottom_depth = interface_bottoms[layer_order][i, j]
+                    lithology = layer_lithology[layer_order]
+
+                    if lithology not in litho_to_idx:
+                        continue
+
+                    litho_idx = litho_to_idx[lithology]
+                    z_top = -top_depth
+                    z_bottom = -bottom_depth
+
+                    for k in range(nz):
+                        z_val = z_grid[k]
+                        if z_bottom <= z_val <= z_top:
+                            if lithology_3d[i, j, k] == -1:
+                                lithology_3d[i, j, k] = litho_idx
+                                confidence_3d[i, j, k] = 1.0
+
+        # 处理未覆盖的区域
+        undefined_mask = lithology_3d == -1
+        if undefined_mask.any():
+            print(f"  填充未定义区域: {undefined_mask.sum()} 个体素")
+            defined_indices = np.array(np.where(~undefined_mask)).T
+            undefined_indices = np.array(np.where(undefined_mask)).T
+
+            if len(defined_indices) > 0 and len(undefined_indices) > 0:
+                tree = KDTree(defined_indices)
+                _, nearest_idx = tree.query(undefined_indices, k=1)
+                for idx, ui in enumerate(undefined_indices):
+                    di = defined_indices[nearest_idx[idx]]
+                    lithology_3d[ui[0], ui[1], ui[2]] = lithology_3d[di[0], di[1], di[2]]
+                    confidence_3d[ui[0], ui[1], ui[2]] = 0.5
+
+        self.grid_lithology = lithology_3d.ravel()
+        self.grid_confidence = confidence_3d.ravel()
+        self.layer_interfaces = {
+            'tops': interface_tops,
+            'bottoms': interface_bottoms,
+            'lithology': layer_lithology
+        }
+
+        print(f"\n模型构建完成!")
+        print(f"  总体素数: {nx * ny * nz}")
+        print(f"  有效体素: {(lithology_3d >= 0).sum()}")
 
     def get_voxel_model(self) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        获取体素模型 (3D数组形式)
-
-        Returns:
-            lithology_3d: 岩性3D数组 [nx, ny, nz]
-            confidence_3d: 置信度3D数组 [nx, ny, nz]
-        """
-        if self.grid_lithology is None:
-            raise ValueError("请先运行interpolate_lithology()")
-
+        """获取体素模型"""
         nx, ny, nz = self.grid_shape
         lithology_3d = self.grid_lithology.reshape(nx, ny, nz)
         confidence_3d = self.grid_confidence.reshape(nx, ny, nz)
-
         return lithology_3d, confidence_3d
 
-    def get_slice(
-        self,
-        axis: str = 'z',
-        index: Optional[int] = None,
-        position: Optional[float] = None
-    ) -> Tuple[np.ndarray, np.ndarray, Dict]:
-        """
-        获取切片
-
-        Args:
-            axis: 切片方向 ('x', 'y', 'z')
-            index: 切片索引 (优先使用)
-            position: 切片位置坐标
-
-        Returns:
-            slice_data: 切片岩性数据
-            slice_coords: 切片坐标网格
-            slice_info: 切片信息
-        """
+    def get_slice(self, axis: str = 'z', index: Optional[int] = None,
+                  position: Optional[float] = None) -> Tuple[np.ndarray, np.ndarray, Dict]:
+        """获取切片"""
         lithology_3d, _ = self.get_voxel_model()
         nx, ny, nz = self.grid_shape
 
@@ -340,15 +355,9 @@ class GeoModel3D:
         return slice_data, slice_coords, slice_info
 
     def export_vtk(self, filepath: str, lithology_names: Optional[List[str]] = None):
-        """
-        导出为VTK格式 (可用于ParaView等软件)
-
-        Args:
-            filepath: 输出文件路径 (.vtk)
-            lithology_names: 岩性名称列表
-        """
+        """导出为VTK格式"""
         if self.grid_lithology is None:
-            raise ValueError("请先运行interpolate_lithology()")
+            raise ValueError("请先构建模型")
 
         nx, ny, nz = self.grid_shape
         x_grid = self.grid_info['x_grid']
@@ -358,31 +367,22 @@ class GeoModel3D:
         lithology_3d, confidence_3d = self.get_voxel_model()
 
         with open(filepath, 'w') as f:
-            # VTK头部
             f.write("# vtk DataFile Version 3.0\n")
-            f.write("3D Geological Model\n")
+            f.write("3D Stratigraphic Model\n")
             f.write("ASCII\n")
             f.write("DATASET RECTILINEAR_GRID\n")
-
-            # 网格维度
             f.write(f"DIMENSIONS {nx} {ny} {nz}\n")
 
-            # X坐标
             f.write(f"X_COORDINATES {nx} float\n")
             f.write(" ".join(f"{x:.6f}" for x in x_grid) + "\n")
 
-            # Y坐标
             f.write(f"Y_COORDINATES {ny} float\n")
             f.write(" ".join(f"{y:.6f}" for y in y_grid) + "\n")
 
-            # Z坐标
             f.write(f"Z_COORDINATES {nz} float\n")
             f.write(" ".join(f"{z:.6f}" for z in z_grid) + "\n")
 
-            # 数据
             f.write(f"POINT_DATA {nx * ny * nz}\n")
-
-            # 岩性标签
             f.write("SCALARS lithology int 1\n")
             f.write("LOOKUP_TABLE default\n")
             for k in range(nz):
@@ -390,35 +390,11 @@ class GeoModel3D:
                     for i in range(nx):
                         f.write(f"{lithology_3d[i, j, k]}\n")
 
-            # 置信度
-            f.write("SCALARS confidence float 1\n")
-            f.write("LOOKUP_TABLE default\n")
-            for k in range(nz):
-                for j in range(ny):
-                    for i in range(nx):
-                        f.write(f"{confidence_3d[i, j, k]:.6f}\n")
-
         print(f"VTK文件已导出: {filepath}")
 
-        # 导出岩性名称映射
-        if lithology_names:
-            json_path = filepath.replace('.vtk', '_lithology_names.json')
-            with open(json_path, 'w', encoding='utf-8') as f:
-                json.dump({i: name for i, name in enumerate(lithology_names)}, f, ensure_ascii=False, indent=2)
-            print(f"岩性名称映射已导出: {json_path}")
-
     def export_numpy(self, filepath: str):
-        """
-        导出为NumPy格式 (.npz)
-
-        Args:
-            filepath: 输出文件路径 (.npz)
-        """
-        if self.grid_lithology is None:
-            raise ValueError("请先运行interpolate_lithology()")
-
+        """导出为NumPy格式"""
         lithology_3d, confidence_3d = self.get_voxel_model()
-
         np.savez_compressed(
             filepath,
             lithology=lithology_3d,
@@ -426,50 +402,46 @@ class GeoModel3D:
             x_grid=self.grid_info['x_grid'],
             y_grid=self.grid_info['y_grid'],
             z_grid=self.grid_info['z_grid'],
-            bounds=np.array([
-                self.bounds['x'],
-                self.bounds['y'],
-                self.bounds['z']
-            ])
+            lithology_classes=self.lithology_classes
         )
         print(f"NumPy文件已导出: {filepath}")
 
     def export_csv(self, filepath: str, lithology_names: Optional[List[str]] = None):
-        """
-        导出为CSV格式
-
-        Args:
-            filepath: 输出文件路径 (.csv)
-            lithology_names: 岩性名称列表
-        """
+        """导出为CSV格式"""
         if self.grid_lithology is None:
-            raise ValueError("请先运行interpolate_lithology()")
+            raise ValueError("请先构建模型")
 
-        df = pd.DataFrame({
-            'x': self.grid_points[:, 0],
-            'y': self.grid_points[:, 1],
-            'z': self.grid_points[:, 2],
-            'lithology_code': self.grid_lithology,
-            'confidence': self.grid_confidence
-        })
+        nx, ny, nz = self.grid_shape
+        x_grid = self.grid_info['x_grid']
+        y_grid = self.grid_info['y_grid']
+        z_grid = self.grid_info['z_grid']
 
+        lithology_3d, confidence_3d = self.get_voxel_model()
+
+        rows = []
+        for i in range(nx):
+            for j in range(ny):
+                for k in range(nz):
+                    rows.append({
+                        'x': x_grid[i],
+                        'y': y_grid[j],
+                        'z': z_grid[k],
+                        'lithology_code': lithology_3d[i, j, k],
+                        'confidence': confidence_3d[i, j, k]
+                    })
+
+        df_out = pd.DataFrame(rows)
         if lithology_names:
-            df['lithology'] = df['lithology_code'].map(
+            df_out['lithology'] = df_out['lithology_code'].map(
                 {i: name for i, name in enumerate(lithology_names)}
             )
-
-        df.to_csv(filepath, index=False, encoding='utf-8-sig')
+        df_out.to_csv(filepath, index=False, encoding='utf-8-sig')
         print(f"CSV文件已导出: {filepath}")
 
     def get_statistics(self, lithology_names: Optional[List[str]] = None) -> pd.DataFrame:
-        """
-        获取模型统计信息
-
-        Returns:
-            stats_df: 统计信息DataFrame
-        """
+        """获取模型统计信息"""
         if self.grid_lithology is None:
-            raise ValueError("请先运行interpolate_lithology()")
+            raise ValueError("请先构建模型")
 
         lithology_3d, confidence_3d = self.get_voxel_model()
         cell_volume = (
@@ -497,120 +469,89 @@ class GeoModel3D:
         return pd.DataFrame(stats)
 
 
-def build_geological_model(
-    trainer,
-    data,
-    result: Dict,
+# 为了向后兼容，保留 GeoModel3D 的别名
+GeoModel3D = StratigraphicModel3D
+
+
+def build_stratigraphic_model_from_df(
+    df: pd.DataFrame,
+    lithology_classes: List[str],
     resolution: Tuple[int, int, int] = (50, 50, 50),
-    interpolation_method: str = 'knn',
     output_dir: str = 'output'
-) -> GeoModel3D:
+) -> StratigraphicModel3D:
     """
-    构建完整的三维地质模型
-
-    Args:
-        trainer: 训练好的GeoModelTrainer
-        data: PyG Data对象
-        result: 数据处理结果字典
-        resolution: 网格分辨率 (nx, ny, nz)
-        interpolation_method: 插值方法
-        output_dir: 输出目录
-
-    Returns:
-        model: GeoModel3D对象
+    从钻孔数据DataFrame直接构建层状地质模型
     """
-    import os
     os.makedirs(output_dir, exist_ok=True)
 
-    print("\n" + "=" * 60)
-    print("构建三维地质模型")
-    print("=" * 60)
-
-    # 1. 获取钻孔点预测结果
-    print("\n[1/4] 获取钻孔点预测...")
-    predictions, probabilities = trainer.predict(data, return_probs=True)
-    coords = data.coords.numpy()
-    confidence = probabilities.max(axis=1)
-
-    print(f"  钻孔采样点数: {len(coords)}")
-    print(f"  预测类别数: {probabilities.shape[1]}")
-
-    # 2. 创建3D模型
-    print("\n[2/4] 创建三维网格...")
-    model = GeoModel3D(
+    model = StratigraphicModel3D(
         resolution=resolution,
-        interpolation_method=interpolation_method,
-        k_neighbors=8
+        interpolation_method='rbf',
+        smoothing=0.1
     )
-    model.build_grid(coords)
-    model.lithology_classes = result['lithology_classes']
 
-    # 3. 插值到网格
-    print("\n[3/4] 插值岩性到网格...")
-    model.interpolate_lithology(coords, predictions, confidence)
+    model.build_stratigraphic_model(df, lithology_classes)
 
-    # 4. 统计和导出
-    print("\n[4/4] 生成统计和导出...")
-    stats = model.get_statistics(result['lithology_classes'])
+    model.export_vtk(os.path.join(output_dir, 'stratigraphic_model.vtk'), lithology_classes)
+    model.export_numpy(os.path.join(output_dir, 'stratigraphic_model.npz'))
+
+    stats = model.get_statistics(lithology_classes)
     print("\n岩性体积统计:")
     print(stats.to_string(index=False))
-
-    # 导出
-    model.export_vtk(os.path.join(output_dir, 'geological_model.vtk'), result['lithology_classes'])
-    model.export_numpy(os.path.join(output_dir, 'geological_model.npz'))
-    model.export_csv(os.path.join(output_dir, 'geological_model.csv'), result['lithology_classes'])
-
-    # 保存统计信息
     stats.to_csv(os.path.join(output_dir, 'model_statistics.csv'), index=False, encoding='utf-8-sig')
-
-    print("\n" + "=" * 60)
-    print("三维地质模型构建完成!")
-    print(f"输出目录: {output_dir}")
-    print("=" * 60)
 
     return model
 
 
 # ============== 测试代码 ==============
 if __name__ == "__main__":
-    print("测试三维地质建模模块...")
+    print("测试层状地质建模模块...")
 
     # 模拟数据
     np.random.seed(42)
-    n_points = 500
 
-    # 模拟钻孔点
-    coords = np.column_stack([
-        np.random.uniform(0, 1000, n_points),
-        np.random.uniform(0, 1000, n_points),
-        np.random.uniform(-500, 0, n_points)
-    ])
+    # 模拟3个钻孔的数据
+    test_data = []
+    for bh_id, (x, y) in enumerate([('BH1', (100, 100)), ('BH2', (500, 100)), ('BH3', (300, 400))]):
+        bh_name, (bh_x, bh_y) = (x, y) if isinstance(x, str) else (f'BH{bh_id}', (x, y))
 
-    # 模拟岩性 (基于深度的简单规则)
-    lithology = np.zeros(n_points, dtype=int)
-    lithology[coords[:, 2] > -100] = 0  # 表层
-    lithology[(coords[:, 2] <= -100) & (coords[:, 2] > -250)] = 1  # 中层
-    lithology[(coords[:, 2] <= -250) & (coords[:, 2] > -400)] = 2  # 深层
-    lithology[coords[:, 2] <= -400] = 3  # 底层
+        # 每个钻孔有5层
+        layers = [
+            ('表土', 0, 10 + np.random.rand() * 5),
+            ('砂岩', 10 + np.random.rand() * 5, 50 + np.random.rand() * 10),
+            ('泥岩', 50 + np.random.rand() * 10, 100 + np.random.rand() * 20),
+            ('煤', 100 + np.random.rand() * 20, 110 + np.random.rand() * 5),
+            ('砂岩', 110 + np.random.rand() * 5, 200),
+        ]
 
-    confidence = np.random.uniform(0.7, 1.0, n_points)
+        for order, (litho, top, bottom) in enumerate(layers):
+            test_data.append({
+                'borehole_id': bh_name,
+                'x': bh_x,
+                'y': bh_y,
+                'layer_order': order,
+                'lithology': litho,
+                'top_depth': top,
+                'bottom_depth': bottom,
+                'layer_thickness': bottom - top
+            })
+
+    df = pd.DataFrame(test_data)
+    print("\n测试数据:")
+    print(df)
 
     # 构建模型
-    model = GeoModel3D(
-        resolution=(30, 30, 30),
-        interpolation_method='knn'
+    model = StratigraphicModel3D(
+        resolution=(20, 20, 20),
+        interpolation_method='rbf'
     )
 
-    model.build_grid(coords)
-    model.interpolate_lithology(coords, lithology, confidence)
+    lithology_classes = ['表土', '砂岩', '泥岩', '煤']
+    model.build_stratigraphic_model(df, lithology_classes)
 
     # 获取统计
-    stats = model.get_statistics(['表层土', '砂岩层', '泥岩层', '基岩'])
+    stats = model.get_statistics(lithology_classes)
     print("\n统计信息:")
     print(stats)
-
-    # 获取切片
-    slice_data, slice_coords, slice_info = model.get_slice('z', position=-200)
-    print(f"\n水平切片 (z=-200m): {slice_data.shape}")
 
     print("\n测试完成!")
