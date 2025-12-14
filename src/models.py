@@ -397,6 +397,7 @@ class EnhancedGeoGNN(nn.Module):
     2. 利用边权重(距离)作为边特征
     3. 深度残差连接和LayerNorm
     4. 层次化特征聚合
+    5. 更宽的网络结构以增加表达能力
     """
 
     def __init__(
@@ -413,29 +414,40 @@ class EnhancedGeoGNN(nn.Module):
         self.dropout = dropout
         self.num_layers = num_layers
 
-        # 深度空间编码器
+        # 确保 hidden_channels 能被 heads 整除
+        if hidden_channels % heads != 0:
+            hidden_channels = (hidden_channels // heads) * heads
+
+        self.hidden_channels = hidden_channels
+
+        # 深度空间编码器 - 增强版
         self.spatial_encoder = nn.Sequential(
-            nn.Linear(3, hidden_channels // 2),
-            nn.LayerNorm(hidden_channels // 2),
+            nn.Linear(3, hidden_channels),
+            nn.LayerNorm(hidden_channels),
             nn.GELU(),
-            nn.Linear(hidden_channels // 2, hidden_channels),
+            nn.Dropout(dropout * 0.5),
+            nn.Linear(hidden_channels, hidden_channels),
             nn.LayerNorm(hidden_channels),
             nn.GELU(),
         )
 
-        # 特征编码器
+        # 特征编码器 - 增强版
         feature_dim = max(in_channels - 3, 1)
         self.feature_encoder = nn.Sequential(
-            nn.Linear(feature_dim, hidden_channels // 2),
-            nn.LayerNorm(hidden_channels // 2),
+            nn.Linear(feature_dim, hidden_channels),
+            nn.LayerNorm(hidden_channels),
             nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_channels // 2, hidden_channels),
+            nn.Dropout(dropout * 0.5),
+            nn.Linear(hidden_channels, hidden_channels),
             nn.LayerNorm(hidden_channels),
         )
 
-        # 特征融合
+        # 特征融合 - 增强版
         self.fusion_layer = nn.Sequential(
+            nn.Linear(hidden_channels * 2, hidden_channels * 2),
+            nn.LayerNorm(hidden_channels * 2),
+            nn.GELU(),
+            nn.Dropout(dropout * 0.5),
             nn.Linear(hidden_channels * 2, hidden_channels),
             nn.LayerNorm(hidden_channels),
             nn.GELU(),
@@ -444,32 +456,37 @@ class EnhancedGeoGNN(nn.Module):
         # 图注意力层 (多层) - 使用GATv2
         self.gat_layers = nn.ModuleList()
         self.layer_norms = nn.ModuleList()
+        self.ffn_layers = nn.ModuleList()  # 添加FFN层增强表达能力
 
         for i in range(num_layers):
             # GATv2Conv, edge_dim=1 (距离权重)
             self.gat_layers.append(
-                GATv2Conv(hidden_channels, hidden_channels // heads, heads=heads, 
+                GATv2Conv(hidden_channels, hidden_channels // heads, heads=heads,
                           dropout=dropout, concat=True, edge_dim=1)
             )
             self.layer_norms.append(nn.LayerNorm(hidden_channels))
+            # 添加FFN (Feed-Forward Network) 增强表达能力
+            self.ffn_layers.append(nn.Sequential(
+                nn.Linear(hidden_channels, hidden_channels * 2),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_channels * 2, hidden_channels),
+            ))
 
-        # 残差投影层
-        self.residual_proj = nn.Linear(hidden_channels, hidden_channels)
-
-        # 层次化聚合
+        # 层次化聚合权重
         self.layer_weights = nn.Parameter(torch.ones(num_layers) / num_layers)
 
-        # 分类头
+        # 分类头 - 增强版
         self.classifier = nn.Sequential(
-            nn.Linear(hidden_channels, hidden_channels),
+            nn.Linear(hidden_channels, hidden_channels * 2),
+            nn.LayerNorm(hidden_channels * 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_channels * 2, hidden_channels),
             nn.LayerNorm(hidden_channels),
             nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_channels, hidden_channels // 2),
-            nn.LayerNorm(hidden_channels // 2),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_channels // 2, out_channels)
+            nn.Dropout(dropout * 0.5),
+            nn.Linear(hidden_channels, out_channels)
         )
 
         self.in_channels = in_channels
@@ -492,17 +509,24 @@ class EnhancedGeoGNN(nn.Module):
         if edge_weight is not None:
             edge_attr = edge_weight.view(-1, 1)
 
-        # 多层GAT with 残差连接和层次聚合
+        # 多层GAT with 残差连接、FFN和层次聚合
         layer_outputs = []
         for i in range(self.num_layers):
-            # 传入edge_attr
-            h_new = self.gat_layers[i](h, edge_index, edge_attr=edge_attr)
-            h_new = self.layer_norms[i](h_new)
-            h_new = F.gelu(h_new)
-            h_new = F.dropout(h_new, p=self.dropout, training=self.training)
+            h_residual = h
+
+            # GAT卷积
+            h = self.gat_layers[i](h, edge_index, edge_attr=edge_attr)
+            h = self.layer_norms[i](h)
+            h = F.gelu(h)
+            h = F.dropout(h, p=self.dropout, training=self.training)
 
             # 残差连接
-            h = h + self.residual_proj(h_new) if i > 0 else h_new
+            h = h + h_residual
+
+            # FFN with residual
+            h_ffn = self.ffn_layers[i](h)
+            h = h + h_ffn
+
             layer_outputs.append(h)
 
         # 层次化聚合
@@ -524,6 +548,11 @@ class GeoTransformer(nn.Module):
     基于Transformer的地质建模网络 (增强版)
     结合了深度空间编码、TransformerConv和Jumping Knowledge
     用于捕捉长距离地质依赖并防止过平滑
+
+    优化改进:
+    1. 更深的编码器
+    2. 添加FFN层
+    3. 更好的残差连接
     """
     def __init__(
         self,
@@ -538,38 +567,49 @@ class GeoTransformer(nn.Module):
         self.dropout = dropout
         self.num_layers = num_layers
 
-        # 1. 深度空间编码器 (处理XYZ坐标)
+        # 确保 hidden_channels 能被 heads 整除
+        if hidden_channels % heads != 0:
+            hidden_channels = (hidden_channels // heads) * heads
+        self.hidden_channels = hidden_channels
+
+        # 1. 深度空间编码器 (处理XYZ坐标) - 增强版
         self.spatial_encoder = nn.Sequential(
-            nn.Linear(3, hidden_channels // 2),
-            nn.LayerNorm(hidden_channels // 2),
+            nn.Linear(3, hidden_channels),
+            nn.LayerNorm(hidden_channels),
             nn.GELU(),
-            nn.Linear(hidden_channels // 2, hidden_channels),
+            nn.Dropout(dropout * 0.5),
+            nn.Linear(hidden_channels, hidden_channels),
             nn.LayerNorm(hidden_channels),
             nn.GELU(),
         )
 
-        # 2. 特征编码器 (处理其他属性)
+        # 2. 特征编码器 (处理其他属性) - 增强版
         feature_dim = max(in_channels - 3, 1)
         self.feature_encoder = nn.Sequential(
-            nn.Linear(feature_dim, hidden_channels // 2),
-            nn.LayerNorm(hidden_channels // 2),
+            nn.Linear(feature_dim, hidden_channels),
+            nn.LayerNorm(hidden_channels),
             nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_channels // 2, hidden_channels),
+            nn.Dropout(dropout * 0.5),
+            nn.Linear(hidden_channels, hidden_channels),
             nn.LayerNorm(hidden_channels),
         )
 
-        # 3. 特征融合层
+        # 3. 特征融合层 - 增强版
         self.fusion_layer = nn.Sequential(
+            nn.Linear(hidden_channels * 2, hidden_channels * 2),
+            nn.LayerNorm(hidden_channels * 2),
+            nn.GELU(),
+            nn.Dropout(dropout * 0.5),
             nn.Linear(hidden_channels * 2, hidden_channels),
             nn.LayerNorm(hidden_channels),
             nn.GELU(),
         )
-        
+
         # 4. Transformer层
         self.convs = nn.ModuleList()
         self.norms = nn.ModuleList()
-        
+        self.ffn_layers = nn.ModuleList()  # 添加FFN
+
         for _ in range(num_layers):
             # beta=True 允许模型学习边权重的缩放
             self.convs.append(
@@ -577,29 +617,33 @@ class GeoTransformer(nn.Module):
                                 dropout=dropout, edge_dim=1, beta=True)
             )
             self.norms.append(nn.LayerNorm(hidden_channels))
+            # FFN层
+            self.ffn_layers.append(nn.Sequential(
+                nn.Linear(hidden_channels, hidden_channels * 4),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_channels * 4, hidden_channels),
+            ))
 
-        # 5. 残差投影 (如果维度变化)
-        self.residual_proj = nn.Linear(hidden_channels, hidden_channels)
+        # 5. 层次聚合权重
+        self.layer_weights = nn.Parameter(torch.ones(num_layers) / num_layers)
 
-        # 6. 分类头 (使用Jumping Knowledge，输入维度翻倍)
-        # JK: Concatenate all layers -> hidden_channels * num_layers
-        jk_dim = hidden_channels * num_layers
-        
+        # 6. 分类头 - 使用加权聚合而非JK拼接
         self.classifier = nn.Sequential(
-            nn.Linear(jk_dim, hidden_channels),
+            nn.Linear(hidden_channels, hidden_channels * 2),
+            nn.LayerNorm(hidden_channels * 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_channels * 2, hidden_channels),
             nn.LayerNorm(hidden_channels),
             nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_channels, hidden_channels // 2),
-            nn.LayerNorm(hidden_channels // 2),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_channels // 2, out_channels)
+            nn.Dropout(dropout * 0.5),
+            nn.Linear(hidden_channels, out_channels)
         )
 
     def forward(self, x: torch.Tensor, edge_index: torch.Tensor,
                 edge_weight: Optional[torch.Tensor] = None) -> torch.Tensor:
-        
+
         # 分离坐标和特征
         coords = x[:, :3]
         features = x[:, 3:] if x.shape[1] > 3 else torch.zeros(x.shape[0], 1, device=x.device)
@@ -610,32 +654,37 @@ class GeoTransformer(nn.Module):
 
         # 融合
         h = self.fusion_layer(torch.cat([spatial_feat, other_feat], dim=1))
-        
+
         # 准备边特征
         edge_attr = None
         if edge_weight is not None:
             edge_attr = edge_weight.view(-1, 1)
 
-        # 保存每一层的输出用于JK
+        # 保存每一层的输出用于层次聚合
         layer_outputs = []
 
         # Transformer 卷积循环
         for i in range(self.num_layers):
             h_in = h
-            
+
             # TransformerConv
             h = self.convs[i](h, edge_index, edge_attr=edge_attr)
             h = self.norms[i](h)
             h = F.gelu(h)
             h = F.dropout(h, p=self.dropout, training=self.training)
-            
+
             # 残差连接
-            h = h + h_in 
-            
+            h = h + h_in
+
+            # FFN with residual
+            h_ffn = self.ffn_layers[i](h)
+            h = h + h_ffn
+
             layer_outputs.append(h)
 
-        # Jumping Knowledge: 拼接所有层的输出
-        h_final = torch.cat(layer_outputs, dim=1)
+        # 层次化聚合 (加权平均)
+        weights = F.softmax(self.layer_weights, dim=0)
+        h_final = sum(w * out for w, out in zip(weights, layer_outputs))
 
         return self.classifier(h_final)
 

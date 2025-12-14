@@ -24,12 +24,12 @@ from src.modeling import GeoModel3D, build_geological_model
 
 def run_full_pipeline(
     data_dir: str = None,
-    model_type: str = 'transformer',  # 优化：默认使用Transformer
-    hidden_dim: int = 384,            # 优化：调整为384，增加容量
-    num_layers: int = 6,              # 优化：保持深度
+    model_type: str = 'graphsage',    # 使用更稳定的GraphSAGE
+    hidden_dim: int = 128,            # 适中的隐藏层大小
+    num_layers: int = 4,              # 适中的深度
     epochs: int = 500,
-    sample_interval: float = 0.8,     # 优化：平衡数据量与噪声
-    k_neighbors: int = 30,            # 优化：调整邻居数
+    sample_interval: float = 1.0,     # 稳定采样间隔
+    k_neighbors: int = 12,            # 适中的k值，避免过平滑
     grid_resolution: tuple = (50, 50, 50),
     output_dir: str = 'output'
 ):
@@ -95,8 +95,8 @@ def run_full_pipeline(
         hidden_channels=hidden_dim,
         out_channels=result['num_classes'],
         num_layers=num_layers,
-        dropout=0.4,  # 优化：略微增加Dropout
-        heads=8  # 优化：增加注意力头数
+        dropout=0.3,  # 适中的Dropout
+        heads=4       # GAT头数
     )
 
     print(f"\n模型: {model_type.upper()}")
@@ -104,18 +104,26 @@ def run_full_pipeline(
     print(f"  输出类别: {result['num_classes']}")
     print(f"  参数量: {sum(p.numel() for p in model.parameters()):,}")
 
-    # 训练
-    class_weights = compute_class_weights(data.y)
+    # 训练 - 使用稳定配置
+    class_weights = compute_class_weights(data.y, method='effective')
 
     trainer = GeoModelTrainer(
         model=model,
         device='auto',
-        learning_rate=0.002,  # 优化：调整学习率
-        weight_decay=1e-4,
+        learning_rate=0.001,       # 稳定的学习率
+        weight_decay=5e-4,         # 适中的权重衰减
+        optimizer_type='adamw',
+        scheduler_type='plateau',  # 稳定的调度器
         class_weights=class_weights,
         loss_type='focal',
         num_classes=result['num_classes'],
-        focal_gamma=2.0  # 优化：调整Focal Gamma
+        focal_gamma=2.0,           # 标准gamma值
+        use_augmentation=True,     # 启用数据增强
+        augment_noise_std=0.02,    # 低噪声
+        augment_edge_drop=0.03,    # 低边丢弃
+        use_mixup=False,           # 关闭Mixup
+        use_ema=True,              # 启用EMA平滑训练
+        ema_decay=0.995            # EMA衰减率
     )
 
     model_path = os.path.join(output_dir, 'models', 'best_model.pt')
@@ -326,13 +334,13 @@ def main():
     # run命令 (完整流程)
     run_parser = subparsers.add_parser('run', help='完整流程: 训练 + 建模')
     run_parser.add_argument('--data', type=str, default='./data', help='数据目录')
-    run_parser.add_argument('--model', type=str, default='transformer',
+    run_parser.add_argument('--model', type=str, default='graphsage',
                            choices=['gcn', 'graphsage', 'gat', 'geo3d', 'enhanced', 'transformer'])
-    run_parser.add_argument('--hidden', type=int, default=384)
-    run_parser.add_argument('--layers', type=int, default=6)
-    run_parser.add_argument('--epochs', type=int, default=300)
-    run_parser.add_argument('--sample-interval', type=float, default=0.8)
-    run_parser.add_argument('--k-neighbors', type=int, default=30)
+    run_parser.add_argument('--hidden', type=int, default=128)
+    run_parser.add_argument('--layers', type=int, default=4)
+    run_parser.add_argument('--epochs', type=int, default=500)
+    run_parser.add_argument('--sample-interval', type=float, default=1.0)
+    run_parser.add_argument('--k-neighbors', type=int, default=12)
     run_parser.add_argument('--resolution', type=int, nargs=3, default=[50, 50, 50],
                            help='网格分辨率 (nx ny nz)')
     run_parser.add_argument('--output', type=str, default='output')
@@ -340,13 +348,13 @@ def main():
     # train命令 (仅训练)
     train_parser = subparsers.add_parser('train', help='仅训练模型')
     train_parser.add_argument('--data', type=str, default='./data')
-    train_parser.add_argument('--model', type=str, default='transformer',
+    train_parser.add_argument('--model', type=str, default='graphsage',
                              choices=['gcn', 'graphsage', 'gat', 'geo3d', 'enhanced', 'transformer'])
-    train_parser.add_argument('--hidden', type=int, default=384)
-    train_parser.add_argument('--layers', type=int, default=6)
-    train_parser.add_argument('--epochs', type=int, default=300)
-    train_parser.add_argument('--sample-interval', type=float, default=0.8)
-    train_parser.add_argument('--k-neighbors', type=int, default=30)
+    train_parser.add_argument('--hidden', type=int, default=128)
+    train_parser.add_argument('--layers', type=int, default=4)
+    train_parser.add_argument('--epochs', type=int, default=500)
+    train_parser.add_argument('--sample-interval', type=float, default=1.0)
+    train_parser.add_argument('--k-neighbors', type=int, default=12)
     train_parser.add_argument('--output', type=str, default='output')
 
     # model命令 (仅建模)

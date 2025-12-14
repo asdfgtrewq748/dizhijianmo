@@ -14,7 +14,14 @@
       "Bash(C:UsersAdministratoranaconda3envsgeomodelpython.exe -m py_compile src/visualization.py)",
       "Bash(where python:*)",
       "Bash(cmd.exe /c \"C:\\Users\\Administrator\\anaconda3\\envs\\geomodel\\python.exe -c \"\"import sys; print(sys.executable); from src.visualization import SCIFigureStyle; print(''OK'')\"\"\")",
-      "Bash(C:UsersAdministratoranaconda3envsgeomodelpython.exe -m pip install:*)"
+      "Bash(C:UsersAdministratoranaconda3envsgeomodelpython.exe -m pip install:*)",
+      "Bash(C:UsersAdministratoranaconda3envsgeomodelpython.exe -m py_compile E:xiangmudizhijianmosrctrainer.py)",
+      "Bash(C:UsersAdministratoranaconda3envsgeomodelpython.exe -m py_compile E:xiangmudizhijianmosrcaugmentation.py)",
+      "Bash(C:UsersAdministratoranaconda3envsgeomodelpython.exe main.py run --epochs 300)",
+      "Bash(C:UsersAdministratoranaconda3envsgeomodelpython.exe -m py_compile E:xiangmudizhijianmoconfigsconfig.py)",
+      "Bash(C:UsersAdministratoranaconda3envsgeomodelpython.exe -m py_compile E:xiangmudizhijianmomain.py)",
+      "Bash(conda activate geomodel)",
+      "Bash(\"C:\\Users\\Administrator\\anaconda3\\envs\\geomodel\\python.exe\" \"E:\\xiangmu\\dizhijianmo\\main.py\" run --epochs 100)"
     ]
   }
 }

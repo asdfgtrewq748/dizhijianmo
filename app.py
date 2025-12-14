@@ -932,29 +932,29 @@ def main():
 
         # 数据设置
         st.subheader("📊 数据配置")
-        sample_interval = st.slider("采样间隔 (米)", 0.5, 5.0, 2.0, 0.5)
+        sample_interval = st.slider("采样间隔 (米)", 0.5, 5.0, 1.0, 0.1)
 
         # 图构建设置
         st.subheader("🔗 图构建")
         graph_type = st.selectbox("图类型", ['knn', 'radius', 'delaunay'])
-        k_neighbors = st.slider("K邻居数", 5, 25, 15)
+        k_neighbors = st.slider("K邻居数", 10, 40, 20)
 
         # 模型设置
         st.subheader("🧠 模型配置")
-        model_type = st.selectbox("模型类型", ['enhanced', 'graphsage', 'gcn', 'gat', 'geo3d'])
-        hidden_dim = st.selectbox("隐藏层维度", [64, 128, 256], index=1)
-        num_layers = st.slider("GNN层数", 2, 6, 4)
-        dropout = st.slider("Dropout", 0.0, 0.5, 0.3)
+        model_type = st.selectbox("模型类型", ['enhanced', 'graphsage', 'gcn', 'gat', 'geo3d'], index=0)
+        hidden_dim = st.selectbox("隐藏层维度", [64, 128, 192, 256], index=2)
+        num_layers = st.slider("GNN层数", 2, 6, 5)
+        dropout = st.slider("Dropout", 0.0, 0.6, 0.2)
 
         # 训练设置
         st.subheader("🎯 训练配置")
         learning_rate = st.select_slider(
             "学习率",
-            options=[0.001, 0.005, 0.01, 0.02],
-            value=0.005
+            options=[0.0008, 0.0010, 0.0015, 0.0020],
+            value=0.0010
         )
         epochs = st.slider("训练轮数", 100, 500, 300)
-        patience = st.slider("早停耐心值", 20, 80, 50)
+        patience = st.slider("早停耐心值", 20, 120, 80)
 
     # 主区域
     tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📊 数据探索", "🚀 模型训练", "📈 结果分析", "🗺️ 三维可视化", "🏗️ 地质建模", "📄 论文配图"])
@@ -1001,9 +1001,10 @@ def main():
                         df = processor.load_all_boreholes(data_dir)
 
                         # 处理数据
+                        # 使用与主流程一致的核心特征，提升判别力
                         result = processor.process(
                             df,
-                            feature_cols=['layer_thickness'],
+                            feature_cols=['layer_thickness', 'relative_depth', 'depth_ratio'],
                             test_size=0.2,
                             val_size=0.1
                         )
@@ -1059,9 +1060,20 @@ def main():
                                                help="调整圆柱体的相对大小")
 
             with vis_col2:
-                if "圆柱体" in vis_mode:
+                # 预览绘图下采样，避免大样本导致内存溢出
+                max_points = 5000
+                if len(df) > max_points:
+                    df_vis = df.sample(max_points, random_state=42)
+                    st.info(f"数据点过多，预览抽样 {max_points} 条以降低内存占用（总数 {len(df)}）")
+                else:
+                    df_vis = df
+
+                # 当样本太多时禁止圆柱体模式，避免生成大规模网格
+                use_cylinder = "圆柱体" in vis_mode and len(df_vis) <= 2000
+
+                if use_cylinder:
                     # 计算基础半径
-                    borehole_coords = df.groupby('borehole_id')[['x', 'y']].first().values
+                    borehole_coords = df_vis.groupby('borehole_id')[['x', 'y']].first().values
                     if len(borehole_coords) > 1:
                         from scipy.spatial import distance
                         dists = distance.pdist(borehole_coords)
@@ -1071,11 +1083,13 @@ def main():
                         base_radius = 50
                     adjusted_radius = base_radius * cylinder_scale
 
-                    fig = plot_borehole_cylinders_3d(df, cylinder_radius=adjusted_radius)
+                    fig = plot_borehole_cylinders_3d(df_vis, cylinder_radius=adjusted_radius)
                 else:
-                    fig = plot_borehole_3d(df)
+                    if "圆柱体" in vis_mode and len(df_vis) > 2000:
+                        st.warning("样本过多，自动切换为散点模式以防内存溢出")
+                    fig = plot_borehole_3d(df_vis)
 
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
 
             # 统计图
             col1, col2 = st.columns(2)
@@ -1113,7 +1127,7 @@ def main():
                 fig_bar.update_layout(showlegend=False)
                 fig_bar.update_xaxes(**SCI_AXIS)
                 fig_bar.update_yaxes(**dict(SCI_AXIS, tickfont=dict(size=10)))
-                st.plotly_chart(fig_bar, use_container_width=True)
+                st.plotly_chart(fig_bar, width="stretch")
 
             with col2:
                 st.subheader("深度分布")
@@ -1196,14 +1210,20 @@ def main():
                 # 类别权重
                 class_weights = compute_class_weights(data.y) if use_class_weights else None
 
-                # 创建训练器 - 使用Focal Loss
+                # 创建训练器 - 使用Focal Loss和数据增强
                 trainer = GeoModelTrainer(
                     model=model,
                     learning_rate=learning_rate,
+                    weight_decay=1e-4,
+                    optimizer_type='adamw',
+                    scheduler_type='cosine',
                     class_weights=class_weights,
                     loss_type='focal',
                     num_classes=result['num_classes'],
-                    focal_gamma=2.0
+                    focal_gamma=1.5,
+                    use_augmentation=True,
+                    augment_noise_std=0.03,
+                    augment_edge_drop=0.05
                 )
 
                 # 训练进度
@@ -1681,7 +1701,7 @@ def main():
                     height=700
                 )
 
-                st.plotly_chart(fig_3d_model, use_container_width=True)
+                st.plotly_chart(fig_3d_model, width="stretch")
 
             # 导出按钮
             st.subheader("导出模型")
@@ -1788,7 +1808,7 @@ def main():
                         show_north_arrow=show_north,
                         return_plotly=True
                     )
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, width="stretch")
 
                     # 导出按钮
                     if st.button("📥 导出高清图 (300 DPI)", key="export_layout"):
@@ -1818,7 +1838,7 @@ def main():
                             connect_layers=connect_layers,
                             return_plotly=True
                         )
-                        st.plotly_chart(fig, use_container_width=True)
+                        st.plotly_chart(fig, width="stretch")
 
                         if st.button("📥 导出高清图 (300 DPI)", key="export_correlation"):
                             paths = st.session_state.exporter.export_figure(
@@ -1848,7 +1868,7 @@ def main():
                         resolution=resolution,
                         return_plotly=True
                     )
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, width="stretch")
 
                     if st.button("📥 导出高清图 (300 DPI)", key="export_contour"):
                         filename = f'thickness_contour_{selected_litho.replace(" ", "_")}'
@@ -1875,7 +1895,7 @@ def main():
                         show_depth_scale=show_depth,
                         return_plotly=True
                     )
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, width="stretch")
 
                     if st.button("📥 导出高清图 (300 DPI)", key="export_column"):
                         paths = st.session_state.exporter.export_figure(
@@ -1893,7 +1913,7 @@ def main():
                     geo_model=geo_model,
                     return_plotly=True
                 )
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
 
                 if st.button("📥 导出高清图 (300 DPI)", key="export_fence"):
                     paths = st.session_state.exporter.export_figure(
@@ -1950,7 +1970,7 @@ def main():
                             sample_size=sample_size,
                             return_plotly=True
                         )
-                        st.plotly_chart(fig, use_container_width=True)
+                        st.plotly_chart(fig, width="stretch")
 
                         if st.button("📥 导出高清图 (300 DPI)", key="export_graph"):
                             paths = st.session_state.exporter.export_figure(
@@ -1979,7 +1999,7 @@ def main():
                                 method=method,
                                 return_plotly=True
                             )
-                        st.plotly_chart(fig, use_container_width=True)
+                        st.plotly_chart(fig, width="stretch")
 
                         if st.button("📥 导出高清图 (300 DPI)", key="export_tsne"):
                             paths = st.session_state.exporter.export_figure(
@@ -1998,7 +2018,7 @@ def main():
                         metrics=['loss', 'accuracy'],
                         return_plotly=True
                     )
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, width="stretch")
 
                     if st.button("📥 导出高清图 (300 DPI)", key="export_curves"):
                         paths = st.session_state.exporter.export_figure(
@@ -2020,7 +2040,7 @@ def main():
                         y_true, y_proba, class_names,
                         return_plotly=True
                     )
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, width="stretch")
 
                     if st.button("📥 导出高清图 (300 DPI)", key="export_roc"):
                         paths = st.session_state.exporter.export_figure(
@@ -2041,7 +2061,7 @@ def main():
                         report, class_names,
                         return_plotly=True
                     )
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, width="stretch")
 
                     if st.button("📥 导出高清图 (300 DPI)", key="export_heatmap"):
                         paths = st.session_state.exporter.export_figure(
@@ -2070,7 +2090,7 @@ def main():
                     fig = st.session_state.result_plots.plot_error_distribution_3d(
                         coords, predictions, true_labels, class_names
                     )
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, width="stretch")
 
                     if st.button("📥 导出高清图 (300 DPI)", key="export_error"):
                         paths = st.session_state.exporter.export_figure(
@@ -2095,7 +2115,7 @@ def main():
                         fig = st.session_state.result_plots.plot_uncertainty_map(
                             coords, confidence, threshold=threshold
                         )
-                        st.plotly_chart(fig, use_container_width=True)
+                        st.plotly_chart(fig, width="stretch")
 
                         if st.button("📥 导出高清图 (300 DPI)", key="export_uncertainty"):
                             paths = st.session_state.exporter.export_figure(
@@ -2117,7 +2137,7 @@ def main():
                         df, predictions, true_labels, class_names,
                         return_plotly=True
                     )
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, width="stretch")
 
                     if st.button("📥 导出高清图 (300 DPI)", key="export_comparison"):
                         paths = st.session_state.exporter.export_figure(
@@ -2138,11 +2158,11 @@ def main():
                     fig = st.session_state.result_plots.plot_volume_statistics(
                         stats, return_plotly=True
                     )
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, width="stretch")
 
                     # 显示统计表格
                     st.subheader("详细统计数据")
-                    st.dataframe(stats, use_container_width=True)
+                    st.dataframe(stats, width="stretch")
 
                     if st.button("📥 导出高清图 (300 DPI)", key="export_volume"):
                         paths = st.session_state.exporter.export_figure(
