@@ -10,7 +10,11 @@
       "Bash(git clone:*)",
       "Bash(dir:*)",
       "Bash(C:UsersAdministratoranaconda3envsgeomodelpython.exe -m py_compile app.py)",
-      "Bash(C:UsersAdministratoranaconda3envsgeomodelpython.exe -m py_compile src/modeling.py)"
+      "Bash(C:UsersAdministratoranaconda3envsgeomodelpython.exe -m py_compile src/modeling.py)",
+      "Bash(C:UsersAdministratoranaconda3envsgeomodelpython.exe -m py_compile src/visualization.py)",
+      "Bash(where python:*)",
+      "Bash(cmd.exe /c \"C:\\Users\\Administrator\\anaconda3\\envs\\geomodel\\python.exe -c \"\"import sys; print(sys.executable); from src.visualization import SCIFigureStyle; print(''OK'')\"\"\")",
+      "Bash(C:UsersAdministratoranaconda3envsgeomodelpython.exe -m pip install:*)"
     ]
   }
 }

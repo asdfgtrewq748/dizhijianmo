@@ -16,7 +16,7 @@ import os
 import json
 from datetime import datetime
 from tqdm import tqdm
-
+import logging
 
 class FocalLoss(nn.Module):
     """
@@ -145,6 +145,11 @@ class GeoModelTrainer:
             )
         elif scheduler_type == 'cosine':
             self.scheduler = CosineAnnealingLR(self.optimizer, T_max=100, eta_min=1e-6)
+        elif scheduler_type == 'cosine_restart':
+            # 优化：添加带重启的余弦退火
+            self.scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+                self.optimizer, T_0=50, T_mult=2, eta_min=1e-6
+            )
         else:
             self.scheduler = None
 
@@ -175,6 +180,18 @@ class GeoModelTrainer:
         self.best_val_f1 = 0.0
         self.best_model_state = None
 
+        # 设置日志
+        self.logger = logging.getLogger('GeoModelTrainer')
+        self.logger.setLevel(logging.INFO)
+        if not self.logger.handlers:
+            # 确保output目录存在
+            os.makedirs('output', exist_ok=True)
+            fh = logging.FileHandler('output/training.log', mode='w', encoding='utf-8')
+            fh.setLevel(logging.INFO)
+            formatter = logging.Formatter('%(asctime)s - %(message)s')
+            fh.setFormatter(formatter)
+            self.logger.addHandler(fh)
+
     def train_epoch(self, data: Data) -> Tuple[float, float]:
         """
         训练一个epoch
@@ -202,6 +219,10 @@ class GeoModelTrainer:
 
         # 反向传播
         loss.backward()
+        
+        # 优化：梯度裁剪，防止梯度爆炸
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+        
         self.optimizer.step()
 
         # 计算准确率
@@ -294,9 +315,14 @@ class GeoModelTrainer:
             self.history['val_f1'].append(val_f1)
             self.history['lr'].append(current_lr)
 
+            # 记录日志
+            self.logger.info(f"Epoch {epoch+1}/{epochs}: Train Loss={train_loss:.4f}, Train Acc={train_acc:.4f}, Val Loss={val_loss:.4f}, Val Acc={val_acc:.4f}, Val F1={val_f1:.4f}, LR={current_lr:.6f}")
+
             # 更新学习率
             if self.scheduler_type == 'plateau':
                 self.scheduler.step(val_acc)  # 使用准确率而非损失
+            elif self.scheduler_type == 'cosine_restart':
+                self.scheduler.step() # 每个epoch更新
             elif self.scheduler_type == 'cosine':
                 self.scheduler.step()
 

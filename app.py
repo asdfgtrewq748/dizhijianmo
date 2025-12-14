@@ -22,6 +22,21 @@ from src.data_loader import BoreholeDataProcessor, GridInterpolator
 from src.trainer import GeoModelTrainer, compute_class_weights
 from src.modeling import StratigraphicModel3D, build_stratigraphic_model_from_df
 
+# 导入SCI可视化模块
+SCI_VIS_ERROR = None
+try:
+    from src.visualization import (
+        SCIFigureStyle, GeologyPlots, MLPlots, ResultPlots, FigureExporter,
+        create_all_figures
+    )
+    SCI_VIS_AVAILABLE = True
+except ImportError as e:
+    SCI_VIS_AVAILABLE = False
+    SCI_VIS_ERROR = f"ImportError: {e}"
+except Exception as e:
+    SCI_VIS_AVAILABLE = False
+    SCI_VIS_ERROR = f"{type(e).__name__}: {e}"
+
 
 # ==================== 页面配置 ====================
 st.set_page_config(
@@ -52,7 +67,7 @@ st.markdown("""
 
 
 # ==================== SCI论文配图样式配置 ====================
-# 专业配色方案 - 适合地质图
+# 专业配色方案 - 适合地质图 (色盲友好且对比度高)
 GEOLOGY_COLORS = [
     '#E64B35',  # 红色 - 煤层
     '#4DBBD5',  # 青色 - 砂岩
@@ -74,72 +89,110 @@ GEOLOGY_COLORS = [
     '#ADB6B6',  # 银灰
 ]
 
+def get_color_palette(n_colors):
+    """获取颜色调色板"""
+    if n_colors <= len(GEOLOGY_COLORS):
+        return GEOLOGY_COLORS[:n_colors]
+    else:
+        # 如果颜色不够，使用Plotly的扩展调色板
+        base_colors = px.colors.qualitative.Dark24
+        if n_colors <= len(base_colors):
+            return base_colors[:n_colors]
+        else:
+            # 如果还不够，循环使用
+            return (base_colors * (n_colors // len(base_colors) + 1))[:n_colors]
+
 # SCI论文图表通用配置
+SCI_FONT = dict(family="Arial, sans-serif", size=14, color='#000000')
+SCI_TITLE_FONT = dict(family="Arial, sans-serif", size=16, color='#000000', weight='bold')
+
 SCI_LAYOUT = dict(
-    font=dict(
-        family="Arial, sans-serif",
-        size=12,
-        color='#333333'
-    ),
+    font=SCI_FONT,
     paper_bgcolor='white',
     plot_bgcolor='white',
-    margin=dict(l=60, r=20, t=50, b=60),
+    margin=dict(l=80, r=20, t=60, b=80),
+    showlegend=True,
 )
 
 # 坐标轴通用配置
 SCI_AXIS = dict(
     showline=True,
     linewidth=1.5,
-    linecolor='#333333',
+    linecolor='#000000',
     showgrid=True,
     gridwidth=0.5,
     gridcolor='#E5E5E5',
     zeroline=False,
     ticks='outside',
     tickwidth=1.5,
-    tickcolor='#333333',
-    title_font=dict(size=12, family="Arial, sans-serif"),
-    mirror=True,
+    tickcolor='#000000',
+    ticklen=5,
+    title_font=dict(size=14, family="Arial, sans-serif", weight='bold'),
+    tickfont=dict(size=12, family="Arial, sans-serif"),
+    mirror=True # 四周都有边框
 )
 
-# 图例通用配置
+# 图例配置
 SCI_LEGEND = dict(
-    font=dict(size=10, family="Arial, sans-serif"),
-    bgcolor='rgba(255,255,255,0.9)',
-    bordercolor='#CCCCCC',
+    bgcolor='rgba(255, 255, 255, 0.9)',
+    bordercolor='#000000',
     borderwidth=1,
+    font=dict(size=12, family="Arial, sans-serif"),
 )
 
-
-def get_color_palette(n: int) -> list:
-    """Return a palette with at least n distinct colors for geological data."""
-    if n <= len(GEOLOGY_COLORS):
-        return GEOLOGY_COLORS[:n]
-
-    # 如果需要更多颜色，扩展调色板
-    extended = GEOLOGY_COLORS.copy()
-    additional = (
-        px.colors.qualitative.Set2
-        + px.colors.qualitative.Pastel1
-        + px.colors.qualitative.Dark2
-    )
-    extended.extend(additional)
-
-    if n <= len(extended):
-        return extended[:n]
-
-    repeats = (n + len(extended) - 1) // len(extended)
-    return (extended * repeats)[:n]
-
-
-def apply_sci_style(fig: go.Figure, height: int = 500) -> go.Figure:
-    """应用SCI论文样式到图表"""
-    fig.update_layout(
-        **SCI_LAYOUT,
-        height=height,
-    )
-    fig.update_xaxes(**SCI_AXIS)
-    fig.update_yaxes(**SCI_AXIS)
+def apply_sci_style(fig, title_text="", x_title="", y_title="", z_title=None, is_3d=False):
+    """应用SCI论文绘图风格"""
+    
+    if is_3d:
+        # 3D场景配置
+        scene_axis = dict(
+            backgroundcolor='white',
+            gridcolor='#E5E5E5',
+            gridwidth=0.5,
+            showbackground=True,
+            linecolor='#000000',
+            linewidth=1.5,
+            tickfont=dict(size=10, family="Arial"),
+            title_font=dict(size=12, family="Arial", weight='bold'),
+            showspikes=False # 去除不必要的辅助线
+        )
+        
+        fig.update_layout(
+            title=dict(
+                text=f"<b>{title_text}</b>",
+                font=SCI_TITLE_FONT,
+                x=0.5, xanchor='center', y=0.95
+            ),
+            scene=dict(
+                xaxis=dict(**scene_axis, title=f"<b>{x_title}</b>"),
+                yaxis=dict(**scene_axis, title=f"<b>{y_title}</b>"),
+                zaxis=dict(**scene_axis, title=f"<b>{z_title}</b>"),
+                aspectmode='data',
+                camera=dict(eye=dict(x=1.5, y=1.5, z=1.2))
+            ),
+            legend=dict(
+                **SCI_LEGEND,
+                yanchor="top", y=0.95, xanchor="left", x=0.02,
+                itemsizing='constant'
+            ),
+            paper_bgcolor='white',
+            margin=dict(l=0, r=0, t=50, b=0),
+            height=700
+        )
+    else:
+        # 2D图表配置
+        fig.update_layout(
+            **SCI_LAYOUT,
+            title=dict(
+                text=f"<b>{title_text}</b>",
+                font=SCI_TITLE_FONT,
+                x=0.5, xanchor='center', y=0.95
+            ),
+            xaxis=dict(**SCI_AXIS, title=f"<b>{x_title}</b>"),
+            yaxis=dict(**SCI_AXIS, title=f"<b>{y_title}</b>"),
+            legend=SCI_LEGEND
+        )
+        
     return fig
 
 
@@ -369,8 +422,8 @@ def plot_borehole_3d(df: pd.DataFrame, color_col: str = 'lithology') -> go.Figur
             marker=dict(
                 size=4,
                 color=color_map[category],
-                opacity=0.85,
-                line=dict(width=0.5, color='#333333')
+                opacity=0.9, # 增加不透明度
+                line=dict(width=0.5, color='#333333') # 增加边框
             ),
             hovertemplate=(
                 f"<b>{category}</b><br>"
@@ -381,46 +434,14 @@ def plot_borehole_3d(df: pd.DataFrame, color_col: str = 'lithology') -> go.Figur
             )
         ))
 
-    # SCI风格的3D场景配置
-    scene_axis = dict(
-        backgroundcolor='#FAFAFA',
-        gridcolor='#E0E0E0',
-        gridwidth=1,
-        showbackground=True,
-        linecolor='#333333',
-        linewidth=2,
-        tickfont=dict(size=10, family="Arial"),
-        title_font=dict(size=12, family="Arial"),
-    )
-
-    fig.update_layout(
-        title=dict(
-            text="<b>3D Borehole Data Visualization</b>",
-            font=dict(size=14, family="Arial", color='#333333'),
-            x=0.5,
-            xanchor='center'
-        ),
-        scene=dict(
-            xaxis=dict(**scene_axis, title="X (m)"),
-            yaxis=dict(**scene_axis, title="Y (m)"),
-            zaxis=dict(**scene_axis, title="Depth (m)"),
-            aspectmode='data',
-            camera=dict(
-                eye=dict(x=1.5, y=1.5, z=1.2)
-            )
-        ),
-        legend=dict(
-            **SCI_LEGEND,
-            title=dict(text="<b>Lithology</b>", font=dict(size=11)),
-            yanchor="top",
-            y=0.95,
-            xanchor="left",
-            x=0.02,
-            itemsizing='constant'
-        ),
-        paper_bgcolor='white',
-        margin=dict(l=0, r=0, t=50, b=0),
-        height=600
+    # 应用SCI样式
+    fig = apply_sci_style(
+        fig, 
+        title_text="3D Borehole Data Visualization", 
+        x_title="X (m)", 
+        y_title="Y (m)", 
+        z_title="Elevation (m)", 
+        is_3d=True
     )
 
     return fig
@@ -455,7 +476,7 @@ def plot_predictions_3d(
                     marker=dict(
                         size=4,
                         color=colors[i],
-                        opacity=0.85,
+                        opacity=0.9,
                         line=dict(width=0.5, color='#333333')
                     ),
                 ))
@@ -486,52 +507,25 @@ def plot_predictions_3d(
                     marker=dict(
                         size=4,
                         color=colors[i],
-                        opacity=0.85,
+                        opacity=0.9,
                         line=dict(width=0.5, color='#333333')
                     ),
                 ))
 
-    # SCI风格的3D场景配置
-    scene_axis = dict(
-        backgroundcolor='#FAFAFA',
-        gridcolor='#E0E0E0',
-        gridwidth=1,
-        showbackground=True,
-        linecolor='#333333',
-        linewidth=2,
-        tickfont=dict(size=10, family="Arial"),
-        title_font=dict(size=12, family="Arial"),
-    )
-
-    fig.update_layout(
-        title=dict(
-            text="<b>Model Prediction Results</b>",
-            font=dict(size=14, family="Arial", color='#333333'),
-            x=0.5,
-            xanchor='center'
-        ),
-        scene=dict(
-            xaxis=dict(**scene_axis, title="X (m)"),
-            yaxis=dict(**scene_axis, title="Y (m)"),
-            zaxis=dict(**scene_axis, title="Depth (m)"),
-            aspectmode='data',
-            camera=dict(eye=dict(x=1.5, y=1.5, z=1.2))
-        ),
-        legend=dict(
-            **SCI_LEGEND,
-            title=dict(text="<b>Lithology</b>", font=dict(size=11)),
-            yanchor="top",
-            y=0.95,
-            xanchor="left",
-            x=0.02,
-            itemsizing='constant'
-        ),
-        paper_bgcolor='white',
-        margin=dict(l=0, r=0, t=50, b=0),
-        height=600
+    # 应用SCI样式
+    fig = apply_sci_style(
+        fig, 
+        title_text="3D Lithology Prediction Model", 
+        x_title="X (m)", 
+        y_title="Y (m)", 
+        z_title="Elevation (m)", 
+        is_3d=True
     )
 
     return fig
+
+
+
 
 
 def plot_borehole_column(df: pd.DataFrame, borehole_id: str) -> go.Figure:
@@ -595,7 +589,7 @@ def plot_borehole_column(df: pd.DataFrame, borehole_id: str) -> go.Figure:
         **SCI_LAYOUT
     )
     fig.update_xaxes(**SCI_AXIS)
-    fig.update_yaxes(**SCI_AXIS, tickfont=dict(size=10))
+    fig.update_yaxes(**dict(SCI_AXIS, tickfont=dict(size=10)))
 
     return fig
 
@@ -665,27 +659,55 @@ def plot_cross_section(
 
 
 def plot_training_history(history: dict) -> go.Figure:
-    """绘制训练历史曲线 - SCI论文质量"""
+    """绘制训练历史曲线 - SCI论文质量（增强版）"""
     fig = go.Figure()
 
     epochs = list(range(1, len(history['train_loss']) + 1))
+    train_loss = history['train_loss']
+    val_loss = history['val_loss']
 
+    # 找到最佳epoch（验证损失最低）
+    best_epoch = epochs[np.argmin(val_loss)]
+    best_val_loss = min(val_loss)
+
+    # 训练损失 - 带填充区域
     fig.add_trace(go.Scatter(
         x=epochs,
-        y=history['train_loss'],
+        y=train_loss,
         mode='lines+markers',
         name='Training Loss',
-        line=dict(color='#3C5488', width=2),
-        marker=dict(size=4, symbol='circle')
+        line=dict(color='#3C5488', width=2.5),
+        marker=dict(size=5, symbol='circle'),
+        hovertemplate='Epoch %{x}<br>Train Loss: %{y:.4f}<extra></extra>'
     ))
+
+    # 验证损失
     fig.add_trace(go.Scatter(
         x=epochs,
-        y=history['val_loss'],
+        y=val_loss,
         mode='lines+markers',
         name='Validation Loss',
-        line=dict(color='#E64B35', width=2),
-        marker=dict(size=4, symbol='square')
+        line=dict(color='#E64B35', width=2.5),
+        marker=dict(size=5, symbol='square'),
+        hovertemplate='Epoch %{x}<br>Val Loss: %{y:.4f}<extra></extra>'
     ))
+
+    # 标注最佳epoch
+    fig.add_trace(go.Scatter(
+        x=[best_epoch],
+        y=[best_val_loss],
+        mode='markers+text',
+        name=f'Best (Epoch {best_epoch})',
+        marker=dict(size=12, color='#00A087', symbol='star', line=dict(width=2, color='black')),
+        text=[f'Best: {best_val_loss:.4f}'],
+        textposition='top center',
+        textfont=dict(size=10, color='#00A087'),
+        showlegend=True
+    ))
+
+    # 最佳epoch垂直参考线
+    fig.add_vline(x=best_epoch, line_dash="dot", line_color="#00A087", line_width=1.5,
+                  annotation_text=f"Best Epoch: {best_epoch}", annotation_position="top right")
 
     fig.update_layout(
         title=dict(
@@ -703,7 +725,7 @@ def plot_training_history(history: dict) -> go.Figure:
             xanchor="right",
             x=0.98
         ),
-        height=400,
+        height=450,
         **SCI_LAYOUT
     )
     fig.update_xaxes(**SCI_AXIS)
@@ -713,39 +735,76 @@ def plot_training_history(history: dict) -> go.Figure:
 
 
 def plot_accuracy_history(history: dict) -> go.Figure:
-    """绘制准确率曲线 - SCI论文质量"""
+    """绘制准确率曲线 - SCI论文质量（增强版）"""
     fig = go.Figure()
 
     epochs = list(range(1, len(history['train_acc']) + 1))
+    val_acc = history['val_acc']
 
+    # 找到最佳epoch（验证准确率最高）
+    best_epoch = epochs[np.argmax(val_acc)]
+    best_val_acc = max(val_acc)
+
+    # 添加baseline参考线 (随机猜测)
+    num_classes = 5  # 默认类别数
+    baseline = 1.0 / num_classes
+    fig.add_hline(y=baseline, line_dash="dash", line_color="gray", line_width=1,
+                  annotation_text=f"Random Baseline ({baseline:.1%})",
+                  annotation_position="bottom right")
+
+    # 训练准确率
     fig.add_trace(go.Scatter(
         x=epochs,
         y=history['train_acc'],
         mode='lines+markers',
         name='Training Accuracy',
-        line=dict(color='#3C5488', width=2),
-        marker=dict(size=4, symbol='circle')
+        line=dict(color='#3C5488', width=2.5),
+        marker=dict(size=5, symbol='circle'),
+        hovertemplate='Epoch %{x}<br>Train Acc: %{y:.4f}<extra></extra>'
     ))
+
+    # 验证准确率
     fig.add_trace(go.Scatter(
         x=epochs,
-        y=history['val_acc'],
+        y=val_acc,
         mode='lines+markers',
         name='Validation Accuracy',
-        line=dict(color='#E64B35', width=2),
-        marker=dict(size=4, symbol='square')
+        line=dict(color='#E64B35', width=2.5),
+        marker=dict(size=5, symbol='square'),
+        hovertemplate='Epoch %{x}<br>Val Acc: %{y:.4f}<extra></extra>'
     ))
+
+    # F1分数
     fig.add_trace(go.Scatter(
         x=epochs,
         y=history['val_f1'],
         mode='lines+markers',
         name='Validation F1-Score',
-        line=dict(color='#00A087', width=2, dash='dash'),
-        marker=dict(size=4, symbol='diamond')
+        line=dict(color='#00A087', width=2.5, dash='dash'),
+        marker=dict(size=5, symbol='diamond'),
+        hovertemplate='Epoch %{x}<br>Val F1: %{y:.4f}<extra></extra>'
     ))
+
+    # 标注最佳epoch
+    fig.add_trace(go.Scatter(
+        x=[best_epoch],
+        y=[best_val_acc],
+        mode='markers+text',
+        name=f'Best (Epoch {best_epoch})',
+        marker=dict(size=12, color='#F39B7F', symbol='star', line=dict(width=2, color='black')),
+        text=[f'Best: {best_val_acc:.4f}'],
+        textposition='bottom center',
+        textfont=dict(size=10, color='#F39B7F'),
+        showlegend=True
+    ))
+
+    # 最佳epoch垂直参考线
+    fig.add_vline(x=best_epoch, line_dash="dot", line_color="#F39B7F", line_width=1.5,
+                  annotation_text=f"Best Epoch: {best_epoch}", annotation_position="top right")
 
     fig.update_layout(
         title=dict(
-            text="<b>Training Progress - Accuracy Curve</b>",
+            text="<b>Training Progress - Accuracy & F1 Curve</b>",
             font=dict(size=14, family="Arial", color='#333333'),
             x=0.5,
             xanchor='center'
@@ -759,7 +818,7 @@ def plot_accuracy_history(history: dict) -> go.Figure:
             xanchor="right",
             x=0.98
         ),
-        height=400,
+        height=450,
         **SCI_LAYOUT
     )
     fig.update_xaxes(**SCI_AXIS)
@@ -769,30 +828,40 @@ def plot_accuracy_history(history: dict) -> go.Figure:
 
 
 def plot_confusion_matrix(cm: np.ndarray, class_names: list) -> go.Figure:
-    """绘制混淆矩阵 - SCI论文质量"""
+    """绘制混淆矩阵 - SCI论文质量（增强版）"""
     # 计算归一化混淆矩阵（按行归一化，显示召回率）
     cm_normalized = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
     cm_normalized = np.nan_to_num(cm_normalized)  # 处理除零
 
-    # 创建注释文本：显示数量和百分比
+    # 计算整体准确率
+    accuracy = np.trace(cm) / cm.sum()
+
+    # 创建注释文本：显示数量和百分比，对角线特殊标注
     annotations = []
     for i in range(len(class_names)):
         for j in range(len(class_names)):
-            annotations.append(f"{cm[i, j]}<br>({cm_normalized[i, j]*100:.1f}%)")
+            if i == j:
+                # 对角线用绿色标注
+                annotations.append(f"<b>{cm[i, j]}</b><br><b>({cm_normalized[i, j]*100:.1f}%)</b>")
+            else:
+                annotations.append(f"{cm[i, j]}<br>({cm_normalized[i, j]*100:.1f}%)")
 
     annotations = np.array(annotations).reshape(cm.shape)
 
+    # 使用改进的颜色方案 - 蓝色渐变
     fig = go.Figure(data=go.Heatmap(
         z=cm,
         x=class_names,
         y=class_names,
         colorscale=[
             [0, '#FFFFFF'],
-            [0.2, '#C6DBEF'],
-            [0.4, '#6BAED6'],
-            [0.6, '#2171B5'],
-            [0.8, '#08519C'],
-            [1.0, '#08306B']
+            [0.15, '#F7FBFF'],
+            [0.3, '#DEEBF7'],
+            [0.45, '#C6DBEF'],
+            [0.6, '#9ECAE1'],
+            [0.75, '#6BAED6'],
+            [0.9, '#3182BD'],
+            [1.0, '#08519C']
         ],
         text=annotations,
         texttemplate="%{text}",
@@ -801,13 +870,25 @@ def plot_confusion_matrix(cm: np.ndarray, class_names: list) -> go.Figure:
         colorbar=dict(
             title=dict(text="<b>Count</b>", font=dict(size=11)),
             tickfont=dict(size=10),
-            thickness=15
-        )
+            thickness=15,
+            len=0.8
+        ),
+        hovertemplate='True: %{y}<br>Predicted: %{x}<br>Count: %{z}<extra></extra>'
     ))
+
+    # 添加对角线边框高亮
+    for i in range(len(class_names)):
+        fig.add_shape(
+            type="rect",
+            x0=i-0.5, y0=i-0.5,
+            x1=i+0.5, y1=i+0.5,
+            line=dict(color="#00A087", width=3),
+            fillcolor="rgba(0,0,0,0)"
+        )
 
     fig.update_layout(
         title=dict(
-            text="<b>Confusion Matrix</b>",
+            text=f"<b>Confusion Matrix</b><br><sub>Overall Accuracy: {accuracy:.1%}</sub>",
             font=dict(size=14, family="Arial", color='#333333'),
             x=0.5,
             xanchor='center'
@@ -818,17 +899,19 @@ def plot_confusion_matrix(cm: np.ndarray, class_names: list) -> go.Figure:
             tickangle=45,
             tickfont=dict(size=10, family="Arial"),
             title_font=dict(size=12, family="Arial"),
-            side='bottom'
+            side='bottom',
+            showgrid=False
         ),
         yaxis=dict(
             tickfont=dict(size=10, family="Arial"),
             title_font=dict(size=12, family="Arial"),
-            autorange='reversed'  # 使对角线从左上到右下
+            autorange='reversed',  # 使对角线从左上到右下
+            showgrid=False
         ),
-        height=550,
+        height=600,
         paper_bgcolor='white',
         plot_bgcolor='white',
-        margin=dict(l=80, r=20, t=60, b=100)
+        margin=dict(l=100, r=40, t=80, b=120)
     )
 
     return fig
@@ -874,7 +957,7 @@ def main():
         patience = st.slider("早停耐心值", 20, 80, 50)
 
     # 主区域
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 数据探索", "🚀 模型训练", "📈 结果分析", "🗺️ 三维可视化", "🏗️ 地质建模"])
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📊 数据探索", "🚀 模型训练", "📈 结果分析", "🗺️ 三维可视化", "🏗️ 地质建模", "📄 论文配图"])
 
     # 初始化session state
     if 'data' not in st.session_state:
@@ -1025,12 +1108,12 @@ def main():
                     xaxis_title="<b>Sample Count</b>",
                     yaxis_title="<b>Lithology</b>",
                     height=400,
-                    showlegend=False,
                     **SCI_LAYOUT
                 )
+                fig_bar.update_layout(showlegend=False)
                 fig_bar.update_xaxes(**SCI_AXIS)
-                fig_bar.update_yaxes(**SCI_AXIS, tickfont=dict(size=10))
-                st.plotly_chart(fig_bar, width="stretch")
+                fig_bar.update_yaxes(**dict(SCI_AXIS, tickfont=dict(size=10)))
+                st.plotly_chart(fig_bar, use_container_width=True)
 
             with col2:
                 st.subheader("深度分布")
@@ -1065,7 +1148,7 @@ def main():
             # 单钻孔柱状图
             st.subheader("钻孔柱状图")
             borehole_ids = df['borehole_id'].unique().tolist()
-            selected_bh = st.selectbox("选择钻孔", borehole_ids)
+            selected_bh = st.selectbox("选择钻孔", borehole_ids, key="overview_borehole_select")
             if selected_bh:
                 fig_col = plot_borehole_column(df, selected_bh)
                 st.plotly_chart(fig_col, width="stretch")
@@ -1626,6 +1709,561 @@ def main():
                     npz_path = os.path.join(output_dir, 'geological_model.npz')
                     geo_model.export_numpy(npz_path)
                     st.success(f"NumPy文件已保存至:\n{npz_path}")
+
+    # Tab 6: 论文配图
+    with tab6:
+        st.header("📄 SCI论文配图生成")
+
+        if not SCI_VIS_AVAILABLE:
+            st.error("SCI可视化模块未加载")
+            if SCI_VIS_ERROR:
+                st.code(SCI_VIS_ERROR, language="text")
+            st.markdown("""
+            **可能的解决方案:**
+            1. 确保 `src/visualization.py` 文件存在
+            2. 在终端运行: `python -c "from src.visualization import SCIFigureStyle"` 检查错误
+            3. 确保所有依赖已安装: `pip install matplotlib scipy scikit-learn`
+            4. 重启Streamlit: `streamlit cache clear && streamlit run app.py`
+            """)
+            st.stop()
+
+        st.markdown("""
+        本模块提供**SCI论文级别**的高质量图件生成功能，支持：
+        - 🌍 **地质专业图件**: 钻孔布置图、地层对比图、厚度等值线图等
+        - 🤖 **机器学习图件**: 模型架构图、学习曲线、ROC曲线等
+        - 📊 **结果分析图件**: 误差分布图、预测对比图、体积统计图等
+        - 📤 **高清导出**: 支持PNG/PDF/SVG格式，300-600 DPI
+        """)
+
+        # 初始化可视化类
+        if 'geo_plots' not in st.session_state:
+            st.session_state.geo_plots = GeologyPlots()
+        if 'ml_plots' not in st.session_state:
+            st.session_state.ml_plots = MLPlots()
+        if 'result_plots' not in st.session_state:
+            st.session_state.result_plots = ResultPlots()
+        if 'exporter' not in st.session_state:
+            project_root = os.path.dirname(os.path.abspath(__file__))
+            st.session_state.exporter = FigureExporter(os.path.join(project_root, 'output', 'figures'))
+
+        # 检查数据是否已加载
+        if st.session_state.df is None:
+            st.warning("⚠️ 请先在'数据探索'标签页加载钻孔数据")
+            st.stop()
+
+        df = st.session_state.df
+        result = st.session_state.result
+
+        # 分类显示不同类型的图件
+        fig_category = st.selectbox(
+            "选择图件类别",
+            ["🌍 地质专业图件", "🤖 机器学习图件", "📊 结果分析图件", "📦 批量导出"]
+        )
+
+        st.divider()
+
+        # ==================== 地质专业图件 ====================
+        if fig_category == "🌍 地质专业图件":
+            geo_fig_type = st.selectbox(
+                "选择图件类型",
+                ["钻孔布置平面图", "地层对比图(栅栏图)", "地层厚度等值线图", "综合地层柱状图", "三维栅栏剖面图"]
+            )
+
+            if geo_fig_type == "钻孔布置平面图":
+                st.subheader("钻孔布置平面图 (Borehole Layout Map)")
+
+                col1, col2 = st.columns([1, 3])
+                with col1:
+                    show_labels = st.checkbox("显示钻孔编号", value=True)
+                    show_hull = st.checkbox("显示研究区边界", value=True)
+                    show_scalebar = st.checkbox("显示比例尺", value=True)
+                    show_north = st.checkbox("显示指北针", value=True)
+
+                with col2:
+                    fig = st.session_state.geo_plots.plot_borehole_layout(
+                        df,
+                        show_labels=show_labels,
+                        show_convex_hull=show_hull,
+                        show_scalebar=show_scalebar,
+                        show_north_arrow=show_north,
+                        return_plotly=True
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+
+                    # 导出按钮
+                    if st.button("📥 导出高清图 (300 DPI)", key="export_layout"):
+                        paths = st.session_state.exporter.export_figure(
+                            fig, 'borehole_layout', formats=['png', 'pdf']
+                        )
+                        st.success(f"已导出: {', '.join(paths)}")
+
+            elif geo_fig_type == "地层对比图(栅栏图)":
+                st.subheader("地层对比图 (Stratigraphic Correlation Diagram)")
+
+                col1, col2 = st.columns([1, 3])
+                with col1:
+                    all_boreholes = df['borehole_id'].unique().tolist()
+                    selected_bhs = st.multiselect(
+                        "选择钻孔",
+                        all_boreholes,
+                        default=all_boreholes[:min(6, len(all_boreholes))]
+                    )
+                    connect_layers = st.checkbox("连接同层位", value=True)
+
+                with col2:
+                    if selected_bhs:
+                        fig = st.session_state.geo_plots.plot_stratigraphic_correlation(
+                            df,
+                            borehole_ids=selected_bhs,
+                            connect_layers=connect_layers,
+                            return_plotly=True
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+
+                        if st.button("📥 导出高清图 (300 DPI)", key="export_correlation"):
+                            paths = st.session_state.exporter.export_figure(
+                                fig, 'stratigraphic_correlation', formats=['png', 'pdf']
+                            )
+                            st.success(f"已导出: {', '.join(paths)}")
+                    else:
+                        st.info("请选择至少一个钻孔")
+
+            elif geo_fig_type == "地层厚度等值线图":
+                st.subheader("地层厚度等值线图 (Thickness Contour Map)")
+
+                col1, col2 = st.columns([1, 3])
+                with col1:
+                    lithologies = sorted(df['lithology'].unique().tolist())
+                    selected_litho = st.selectbox(
+                        "选择岩性",
+                        ["总厚度"] + lithologies
+                    )
+                    resolution = st.slider("插值分辨率", 20, 100, 50)
+
+                with col2:
+                    litho_param = None if selected_litho == "总厚度" else selected_litho
+                    fig = st.session_state.geo_plots.plot_thickness_contour(
+                        df,
+                        lithology=litho_param,
+                        resolution=resolution,
+                        return_plotly=True
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+
+                    if st.button("📥 导出高清图 (300 DPI)", key="export_contour"):
+                        filename = f'thickness_contour_{selected_litho.replace(" ", "_")}'
+                        paths = st.session_state.exporter.export_figure(
+                            fig, filename, formats=['png', 'pdf']
+                        )
+                        st.success(f"已导出: {', '.join(paths)}")
+
+            elif geo_fig_type == "综合地层柱状图":
+                st.subheader("综合地层柱状图 (Stratigraphic Column)")
+
+                col1, col2 = st.columns([1, 3])
+                with col1:
+                    all_boreholes = df['borehole_id'].unique().tolist()
+                    selected_bh = st.selectbox("选择钻孔", all_boreholes, key="strat_column_borehole_select")
+                    show_pattern = st.checkbox("显示填充图案", value=True)
+                    show_depth = st.checkbox("显示深度刻度", value=True)
+
+                with col2:
+                    fig = st.session_state.geo_plots.plot_stratigraphic_column(
+                        df,
+                        borehole_id=selected_bh,
+                        show_pattern=show_pattern,
+                        show_depth_scale=show_depth,
+                        return_plotly=True
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+
+                    if st.button("📥 导出高清图 (300 DPI)", key="export_column"):
+                        paths = st.session_state.exporter.export_figure(
+                            fig, f'stratigraphic_column_{selected_bh}', formats=['png', 'pdf']
+                        )
+                        st.success(f"已导出: {', '.join(paths)}")
+
+            elif geo_fig_type == "三维栅栏剖面图":
+                st.subheader("三维栅栏剖面图 (3D Fence Diagram)")
+
+                geo_model = st.session_state.get('geo_model', None)
+
+                fig = st.session_state.geo_plots.plot_fence_diagram(
+                    df,
+                    geo_model=geo_model,
+                    return_plotly=True
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+                if st.button("📥 导出高清图 (300 DPI)", key="export_fence"):
+                    paths = st.session_state.exporter.export_figure(
+                        fig, 'fence_diagram', formats=['png', 'pdf', 'html']
+                    )
+                    st.success(f"已导出: {', '.join(paths)}")
+
+        # ==================== 机器学习图件 ====================
+        elif fig_category == "🤖 机器学习图件":
+            ml_fig_type = st.selectbox(
+                "选择图件类型",
+                ["GNN模型架构图", "图结构可视化", "特征降维可视化(t-SNE)", "学习曲线", "ROC曲线", "分类报告热力图"]
+            )
+
+            if ml_fig_type == "GNN模型架构图":
+                st.subheader("GNN模型架构图 (Model Architecture)")
+
+                col1, col2 = st.columns([1, 3])
+                with col1:
+                    model_config = {
+                        'input_dim': st.number_input("输入维度", 1, 100, 16),
+                        'hidden_dim': st.number_input("隐藏维度", 32, 512, 128),
+                        'output_dim': st.number_input("输出类别", 2, 20, result.get('num_classes', 5) if result else 5),
+                        'num_layers': st.slider("GNN层数", 2, 8, 4),
+                        'model_type': st.selectbox("模型类型", ['GCN', 'GAT', 'GraphSAGE', 'GNN'])
+                    }
+
+                with col2:
+                    fig = st.session_state.ml_plots.plot_model_architecture(
+                        model_config,
+                        return_plotly=False
+                    )
+                    st.pyplot(fig)
+
+                    if st.button("📥 导出高清图 (300 DPI)", key="export_arch"):
+                        paths = st.session_state.exporter.export_figure(
+                            fig, 'model_architecture', formats=['png', 'pdf']
+                        )
+                        st.success(f"已导出: {', '.join(paths)}")
+
+            elif ml_fig_type == "图结构可视化":
+                st.subheader("图结构可视化 (Graph Structure)")
+
+                if st.session_state.data is None:
+                    st.warning("请先加载数据并处理")
+                else:
+                    col1, col2 = st.columns([1, 3])
+                    with col1:
+                        sample_size = st.slider("采样节点数", 50, 500, 200)
+
+                    with col2:
+                        fig = st.session_state.ml_plots.plot_graph_structure(
+                            st.session_state.data,
+                            sample_size=sample_size,
+                            return_plotly=True
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+
+                        if st.button("📥 导出高清图 (300 DPI)", key="export_graph"):
+                            paths = st.session_state.exporter.export_figure(
+                                fig, 'graph_structure', formats=['png', 'pdf', 'html']
+                            )
+                            st.success(f"已导出: {', '.join(paths)}")
+
+            elif ml_fig_type == "特征降维可视化(t-SNE)":
+                st.subheader("特征空间降维可视化 (t-SNE/UMAP)")
+
+                if st.session_state.data is None:
+                    st.warning("请先加载数据并处理")
+                else:
+                    col1, col2 = st.columns([1, 3])
+                    with col1:
+                        method = st.selectbox("降维方法", ['tsne', 'umap'])
+
+                    with col2:
+                        features = st.session_state.data.x.cpu().numpy()
+                        labels = st.session_state.data.y.cpu().numpy()
+                        class_names = result.get('lithology_classes', None) if result else None
+
+                        with st.spinner("正在计算降维..."):
+                            fig = st.session_state.ml_plots.plot_feature_embedding(
+                                features, labels, class_names,
+                                method=method,
+                                return_plotly=True
+                            )
+                        st.plotly_chart(fig, use_container_width=True)
+
+                        if st.button("📥 导出高清图 (300 DPI)", key="export_tsne"):
+                            paths = st.session_state.exporter.export_figure(
+                                fig, f'feature_embedding_{method}', formats=['png', 'pdf']
+                            )
+                            st.success(f"已导出: {', '.join(paths)}")
+
+            elif ml_fig_type == "学习曲线":
+                st.subheader("学习曲线 (Learning Curves)")
+
+                if st.session_state.history is None:
+                    st.warning("请先训练模型")
+                else:
+                    fig = st.session_state.ml_plots.plot_learning_curves(
+                        {'Model': st.session_state.history},
+                        metrics=['loss', 'accuracy'],
+                        return_plotly=True
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+
+                    if st.button("📥 导出高清图 (300 DPI)", key="export_curves"):
+                        paths = st.session_state.exporter.export_figure(
+                            fig, 'learning_curves', formats=['png', 'pdf']
+                        )
+                        st.success(f"已导出: {', '.join(paths)}")
+
+            elif ml_fig_type == "ROC曲线":
+                st.subheader("ROC曲线 (Multi-class ROC)")
+
+                if st.session_state.probs is None:
+                    st.warning("请先评估模型")
+                else:
+                    y_true = st.session_state.data.y.cpu().numpy()
+                    y_proba = st.session_state.probs
+                    class_names = result.get('lithology_classes', None) if result else None
+
+                    fig = st.session_state.ml_plots.plot_roc_curves(
+                        y_true, y_proba, class_names,
+                        return_plotly=True
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+
+                    if st.button("📥 导出高清图 (300 DPI)", key="export_roc"):
+                        paths = st.session_state.exporter.export_figure(
+                            fig, 'roc_curves', formats=['png', 'pdf']
+                        )
+                        st.success(f"已导出: {', '.join(paths)}")
+
+            elif ml_fig_type == "分类报告热力图":
+                st.subheader("分类性能热力图 (Classification Heatmap)")
+
+                if st.session_state.eval_results is None:
+                    st.warning("请先评估模型")
+                else:
+                    report = st.session_state.eval_results.get('classification_report', {})
+                    class_names = result.get('lithology_classes', None) if result else None
+
+                    fig = st.session_state.ml_plots.plot_classification_heatmap(
+                        report, class_names,
+                        return_plotly=True
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+
+                    if st.button("📥 导出高清图 (300 DPI)", key="export_heatmap"):
+                        paths = st.session_state.exporter.export_figure(
+                            fig, 'classification_heatmap', formats=['png', 'pdf']
+                        )
+                        st.success(f"已导出: {', '.join(paths)}")
+
+        # ==================== 结果分析图件 ====================
+        elif fig_category == "📊 结果分析图件":
+            result_fig_type = st.selectbox(
+                "选择图件类型",
+                ["预测误差空间分布图", "预测不确定性分布图", "钻孔预测准确率对比", "岩性体积统计图"]
+            )
+
+            if result_fig_type == "预测误差空间分布图":
+                st.subheader("预测误差空间分布图 (Error Distribution)")
+
+                if st.session_state.predictions is None:
+                    st.warning("请先评估模型")
+                else:
+                    coords = st.session_state.data.coords.cpu().numpy()
+                    predictions = st.session_state.predictions
+                    true_labels = st.session_state.data.y.cpu().numpy()
+                    class_names = result.get('lithology_classes', None) if result else None
+
+                    fig = st.session_state.result_plots.plot_error_distribution_3d(
+                        coords, predictions, true_labels, class_names
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+
+                    if st.button("📥 导出高清图 (300 DPI)", key="export_error"):
+                        paths = st.session_state.exporter.export_figure(
+                            fig, 'error_distribution', formats=['png', 'pdf', 'html']
+                        )
+                        st.success(f"已导出: {', '.join(paths)}")
+
+            elif result_fig_type == "预测不确定性分布图":
+                st.subheader("预测不确定性分布图 (Uncertainty Map)")
+
+                if st.session_state.probs is None:
+                    st.warning("请先评估模型")
+                else:
+                    coords = st.session_state.data.coords.cpu().numpy()
+                    confidence = st.session_state.probs.max(axis=1)
+
+                    col1, col2 = st.columns([1, 3])
+                    with col1:
+                        threshold = st.slider("置信度阈值", 0.5, 0.99, 0.8)
+
+                    with col2:
+                        fig = st.session_state.result_plots.plot_uncertainty_map(
+                            coords, confidence, threshold=threshold
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+
+                        if st.button("📥 导出高清图 (300 DPI)", key="export_uncertainty"):
+                            paths = st.session_state.exporter.export_figure(
+                                fig, 'uncertainty_map', formats=['png', 'pdf', 'html']
+                            )
+                            st.success(f"已导出: {', '.join(paths)}")
+
+            elif result_fig_type == "钻孔预测准确率对比":
+                st.subheader("钻孔预测准确率对比 (Accuracy by Borehole)")
+
+                if st.session_state.predictions is None:
+                    st.warning("请先评估模型")
+                else:
+                    predictions = st.session_state.predictions
+                    true_labels = st.session_state.data.y.cpu().numpy()
+                    class_names = result.get('lithology_classes', None) if result else None
+
+                    fig = st.session_state.result_plots.plot_prediction_comparison(
+                        df, predictions, true_labels, class_names,
+                        return_plotly=True
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+
+                    if st.button("📥 导出高清图 (300 DPI)", key="export_comparison"):
+                        paths = st.session_state.exporter.export_figure(
+                            fig, 'prediction_comparison', formats=['png', 'pdf']
+                        )
+                        st.success(f"已导出: {', '.join(paths)}")
+
+            elif result_fig_type == "岩性体积统计图":
+                st.subheader("岩性体积统计图 (Volume Statistics)")
+
+                geo_model = st.session_state.get('geo_model', None)
+
+                if geo_model is None:
+                    st.warning("请先构建三维地质模型")
+                else:
+                    stats = geo_model.get_statistics(result.get('lithology_classes', []))
+
+                    fig = st.session_state.result_plots.plot_volume_statistics(
+                        stats, return_plotly=True
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+
+                    # 显示统计表格
+                    st.subheader("详细统计数据")
+                    st.dataframe(stats, use_container_width=True)
+
+                    if st.button("📥 导出高清图 (300 DPI)", key="export_volume"):
+                        paths = st.session_state.exporter.export_figure(
+                            fig, 'volume_statistics', formats=['png', 'pdf']
+                        )
+                        st.success(f"已导出: {', '.join(paths)}")
+
+        # ==================== 批量导出 ====================
+        elif fig_category == "📦 批量导出":
+            st.subheader("批量导出SCI论文配图")
+
+            st.markdown("""
+            一键生成并导出所有可用的SCI论文配图。导出格式包括：
+            - **PNG**: 300 DPI 位图，适合Word/PPT
+            - **PDF**: 矢量图，适合论文投稿
+            - **HTML**: 交互式图表（仅3D图件）
+            """)
+
+            col1, col2 = st.columns(2)
+            with col1:
+                export_formats = st.multiselect(
+                    "选择导出格式",
+                    ['png', 'pdf', 'svg', 'html'],
+                    default=['png', 'pdf']
+                )
+            with col2:
+                export_dpi = st.selectbox("分辨率 (DPI)", [300, 600], index=0)
+
+            if st.button("🚀 批量生成所有图件", type="primary"):
+                with st.spinner("正在生成图件..."):
+                    progress = st.progress(0)
+                    status = st.empty()
+
+                    generated_figures = {}
+
+                    # 1. 地质图件
+                    status.text("生成钻孔布置图...")
+                    generated_figures['borehole_layout'] = st.session_state.geo_plots.plot_borehole_layout(
+                        df, return_plotly=True)
+                    progress.progress(0.1)
+
+                    status.text("生成地层对比图...")
+                    generated_figures['stratigraphic_correlation'] = st.session_state.geo_plots.plot_stratigraphic_correlation(
+                        df, return_plotly=True)
+                    progress.progress(0.2)
+
+                    # 主要岩性厚度图
+                    lithologies = sorted(df['lithology'].unique())[:3]
+                    for i, litho in enumerate(lithologies):
+                        status.text(f"生成{litho}厚度等值线图...")
+                        generated_figures[f'thickness_{litho}'] = st.session_state.geo_plots.plot_thickness_contour(
+                            df, lithology=litho, return_plotly=True)
+                    progress.progress(0.4)
+
+                    # 2. ML图件 (如果有训练数据)
+                    if st.session_state.history is not None:
+                        status.text("生成学习曲线...")
+                        generated_figures['learning_curves'] = st.session_state.ml_plots.plot_learning_curves(
+                            {'Model': st.session_state.history}, return_plotly=True)
+                    progress.progress(0.5)
+
+                    if st.session_state.probs is not None:
+                        status.text("生成ROC曲线...")
+                        y_true = st.session_state.data.y.cpu().numpy()
+                        generated_figures['roc_curves'] = st.session_state.ml_plots.plot_roc_curves(
+                            y_true, st.session_state.probs,
+                            result.get('lithology_classes', None) if result else None,
+                            return_plotly=True)
+                    progress.progress(0.6)
+
+                    if st.session_state.eval_results is not None:
+                        status.text("生成分类热力图...")
+                        generated_figures['classification_heatmap'] = st.session_state.ml_plots.plot_classification_heatmap(
+                            st.session_state.eval_results.get('classification_report', {}),
+                            result.get('lithology_classes', None) if result else None,
+                            return_plotly=True)
+                    progress.progress(0.7)
+
+                    # 3. 结果图件
+                    if st.session_state.predictions is not None:
+                        status.text("生成误差分布图...")
+                        coords = st.session_state.data.coords.cpu().numpy()
+                        generated_figures['error_distribution'] = st.session_state.result_plots.plot_error_distribution_3d(
+                            coords, st.session_state.predictions,
+                            st.session_state.data.y.cpu().numpy(),
+                            result.get('lithology_classes', None) if result else None)
+
+                        status.text("生成预测对比图...")
+                        generated_figures['prediction_comparison'] = st.session_state.result_plots.plot_prediction_comparison(
+                            df, st.session_state.predictions,
+                            st.session_state.data.y.cpu().numpy(),
+                            result.get('lithology_classes', []) if result else [],
+                            return_plotly=True)
+                    progress.progress(0.8)
+
+                    geo_model = st.session_state.get('geo_model', None)
+                    if geo_model is not None:
+                        status.text("生成体积统计图...")
+                        stats = geo_model.get_statistics(result.get('lithology_classes', []))
+                        generated_figures['volume_statistics'] = st.session_state.result_plots.plot_volume_statistics(
+                            stats, return_plotly=True)
+                    progress.progress(0.9)
+
+                    # 导出所有图件
+                    status.text("导出图件...")
+                    export_results = st.session_state.exporter.export_batch(
+                        generated_figures, formats=export_formats, dpi=export_dpi
+                    )
+                    progress.progress(1.0)
+
+                    status.text("完成!")
+
+                    # 显示结果
+                    st.success(f"✅ 成功生成 {len(generated_figures)} 个图件!")
+
+                    # 列出导出的文件
+                    st.subheader("导出文件列表")
+                    for name, paths in export_results.items():
+                        with st.expander(f"📄 {name}"):
+                            for p in paths:
+                                st.code(p)
 
 
 if __name__ == "__main__":

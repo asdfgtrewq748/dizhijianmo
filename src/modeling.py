@@ -12,6 +12,15 @@ from scipy.ndimage import gaussian_filter
 from typing import Tuple, Dict, List, Optional
 import os
 import json
+import warnings
+
+# 尝试导入pykrige
+try:
+    from pykrige.ok import OrdinaryKriging
+    HAS_PYKRIGE = True
+except ImportError:
+    HAS_PYKRIGE = False
+    print("警告: 未安装pykrige，克里金插值将不可用")
 
 
 class StratigraphicModel3D:
@@ -149,10 +158,53 @@ class StratigraphicModel3D:
         xy = np.array([[p['x'], p['y']] for p in points])
         z = np.array([p[depth_key] for p in points])
 
+        # 移除重复点 (坐标相同但深度不同的点取平均)
+        df_points = pd.DataFrame({'x': xy[:, 0], 'y': xy[:, 1], 'z': z})
+        df_unique = df_points.groupby(['x', 'y']).mean().reset_index()
+        xy = df_unique[['x', 'y']].values
+        z = df_unique['z'].values
+
         XX, YY = np.meshgrid(grid_x, grid_y, indexing='ij')
         grid_points = np.column_stack([XX.ravel(), YY.ravel()])
 
-        if self.interpolation_method == 'rbf':
+        # 1. 克里金插值 (优先)
+        if self.interpolation_method == 'kriging' and HAS_PYKRIGE:
+            try:
+                # 如果点数过多，进行降采样以避免内存溢出
+                MAX_KRIGING_POINTS = 500
+                if len(xy) > MAX_KRIGING_POINTS:
+                    indices = np.random.choice(len(xy), MAX_KRIGING_POINTS, replace=False)
+                    xy_k, z_k = xy[indices], z[indices]
+                else:
+                    xy_k, z_k = xy, z
+
+                OK = OrdinaryKriging(
+                    xy_k[:, 0], xy_k[:, 1], z_k,
+                    variogram_model='spherical',
+                    verbose=False,
+                    enable_plotting=False
+                )
+                
+                # 执行插值
+                z_pred, ss = OK.execute('grid', grid_x, grid_y)
+                # pykrige返回的形状可能是 (ny, nx)，需要转置为 (nx, ny)
+                if z_pred.shape != XX.shape:
+                    z_pred = z_pred.T
+                
+                interpolated = z_pred
+                
+            except Exception as e:
+                print(f"克里金插值失败，回退到RBF: {e}")
+                # 回退到RBF
+                try:
+                    interpolator = RBFInterpolator(xy, z, smoothing=self.smoothing, kernel='thin_plate_spline')
+                    interpolated = interpolator(grid_points).reshape(XX.shape)
+                except:
+                    interpolator = LinearNDInterpolator(xy, z, fill_value=np.mean(z))
+                    interpolated = interpolator(grid_points).reshape(XX.shape)
+
+        # 2. RBF插值
+        elif self.interpolation_method == 'rbf' or (self.interpolation_method == 'kriging' and not HAS_PYKRIGE):
             try:
                 interpolator = RBFInterpolator(xy, z, smoothing=self.smoothing, kernel='thin_plate_spline')
                 interpolated = interpolator(grid_points).reshape(XX.shape)
@@ -161,6 +213,7 @@ class StratigraphicModel3D:
                 interpolator = LinearNDInterpolator(xy, z, fill_value=np.mean(z))
                 interpolated = interpolator(grid_points).reshape(XX.shape)
 
+        # 3. IDW插值
         elif self.interpolation_method == 'idw':
             tree = KDTree(xy)
             distances, indices = tree.query(grid_points, k=min(len(points), 8))
@@ -169,13 +222,24 @@ class StratigraphicModel3D:
             weights /= weights.sum(axis=1, keepdims=True)
             interpolated = (weights * z[indices]).sum(axis=1).reshape(XX.shape)
 
+        # 4. 线性插值
         elif self.interpolation_method == 'linear':
             interpolator = LinearNDInterpolator(xy, z, fill_value=np.mean(z))
             interpolated = interpolator(grid_points).reshape(XX.shape)
 
+        # 5. 最近邻插值 (默认)
         else:
             interpolator = NearestNDInterpolator(xy, z)
             interpolated = interpolator(grid_points).reshape(XX.shape)
+            
+        # 后处理：异常值裁剪 (防止插值结果超出合理范围)
+        z_min, z_max = z.min(), z.max()
+        z_range = z_max - z_min
+        if z_range > 0:
+            # 允许超出一定范围 (例如 50%)
+            safe_min = z_min - z_range * 0.5
+            safe_max = z_max + z_range * 0.5
+            interpolated = np.clip(interpolated, safe_min, safe_max)
 
         return interpolated
 
@@ -501,6 +565,56 @@ def build_stratigraphic_model_from_df(
     stats.to_csv(os.path.join(output_dir, 'model_statistics.csv'), index=False, encoding='utf-8-sig')
 
     return model
+
+
+# ==================== 兼容性代码 ====================
+
+def build_geological_model(
+    trainer,
+    data,
+    result,
+    resolution=(50, 50, 50),
+    interpolation_method='rbf',
+    output_dir='output'
+):
+    """
+    构建三维地质模型 (兼容性包装器)
+    """
+    print("正在构建地质模型...")
+    
+    # 从result中获取原始DataFrame
+    if 'raw_df' in result:
+        df = result['raw_df']
+    else:
+        print("警告: 无法获取原始DataFrame，建模可能失败")
+        return None
+        
+    # 使用StratigraphicModel3D
+    model = StratigraphicModel3D(
+        resolution=resolution,
+        interpolation_method=interpolation_method
+    )
+    
+    model.build_stratigraphic_model(df, result['lithology_classes'])
+    
+    # 保存统计信息
+    os.makedirs(output_dir, exist_ok=True)
+    stats = model.get_statistics(result['lithology_classes'])
+    stats.to_csv(os.path.join(output_dir, 'model_statistics.csv'), index=False, encoding='utf-8-sig')
+    
+    # 保存模型数据
+    lithology_3d, confidence_3d = model.get_voxel_model()
+    np.savez(
+        os.path.join(output_dir, 'geological_model.npz'),
+        lithology=lithology_3d,
+        confidence=confidence_3d,
+        info=model.grid_info
+    )
+    
+    return model
+
+# 别名
+GeoModel3D = StratigraphicModel3D
 
 
 # ============== 测试代码 ==============

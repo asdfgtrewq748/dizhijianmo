@@ -302,9 +302,9 @@ class BoreholeDataProcessor:
             '粉砂岩': '粉砂岩',
             '��ɰ��': '粉砂岩',
             # 砾岩类
-            '中砾岩': '中砾岩',
-            '粗砾岩': '粗砾岩',
-            '细砾岩': '细砾岩',
+            '中砾岩': '砾岩',
+            '粗砾岩': '砾岩',
+            '细砾岩': '砾岩',
             '砾岩': '砾岩',
             # 泥岩类
             '泥�ite': '泥岩',
@@ -320,6 +320,11 @@ class BoreholeDataProcessor:
             'ɰ����': '砂砾岩',
             '页岩': '页岩',
             '灰岩': '灰岩',
+            '砂岩': '中砂岩',
+            '表土': '腐殖土',
+            '黄土': '粘土',
+            '粘土': '粘土',
+            '黏土': '粘土',
         }
 
         # 创建一个清理后的岩性列
@@ -532,6 +537,39 @@ class BoreholeDataProcessor:
             features = np.nan_to_num(features, nan=0.0)
         else:
             features = np.zeros((len(df), 1), dtype=np.float32)
+        
+        # ========== 特征工程增强 ==========
+        # 添加层序特征（如果存在）
+        engineered_features = []
+        
+        if 'layer_order' in df.columns:
+            # 归一化层序号
+            layer_order = df['layer_order'].values.astype(np.float32)
+            layer_order_norm = (layer_order - layer_order.min()) / (layer_order.max() - layer_order.min() + 1e-8)
+            engineered_features.append(layer_order_norm.reshape(-1, 1))
+        
+        if 'thickness' in df.columns:
+            # 厚度特征（已包含在feature_cols中，但添加log变换）
+            thickness = df['thickness'].fillna(df['thickness'].median()).values
+            log_thickness = np.log1p(thickness).reshape(-1, 1)  # log(1+x)变换
+            engineered_features.append(log_thickness)
+        
+        # 空间衍生特征
+        # 1. 到质心的距离
+        centroid = coords.mean(axis=0)
+        dist_to_center = np.linalg.norm(coords - centroid, axis=1).reshape(-1, 1)
+        engineered_features.append(dist_to_center)
+        
+        # 2. 深度分段特征 (z轴离散化)
+        z_coords = coords[:, 2]
+        z_bins = np.percentile(z_coords, [0, 25, 50, 75, 100])
+        z_binned = np.digitize(z_coords, z_bins).astype(np.float32).reshape(-1, 1)
+        engineered_features.append(z_binned)
+        
+        # 合并所有特征
+        if engineered_features:
+            features = np.concatenate([features] + engineered_features, axis=1)
+            print(f"添加工程特征后，特征维度: {features.shape[1]}")
 
         # 提取并编码标签
         labels = df[label_col].values

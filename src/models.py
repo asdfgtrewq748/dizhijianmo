@@ -6,15 +6,20 @@ GNN模型定义模块
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.nn import GCNConv, SAGEConv, GATConv, BatchNorm
+from torch_geometric.nn import GCNConv, SAGEConv, GATConv, GATv2Conv, TransformerConv, BatchNorm
 from torch_geometric.nn import global_mean_pool, global_max_pool
 from typing import Optional, List, Tuple
 
 
 class GeoGCN(nn.Module):
     """
-    基于GCN的地质建模网络
+    基于GCN的地质建模网络 (增强版)
     用于根据钻孔数据预测三维空间中的岩性类别
+    
+    优化改进:
+    - 添加残差连接
+    - 添加输入投影层
+    - 支持更深的网络结构
     """
 
     def __init__(
@@ -24,25 +29,25 @@ class GeoGCN(nn.Module):
         out_channels: int,           # 输出类别数 (岩性种类数)
         num_layers: int = 3,         # GCN层数
         dropout: float = 0.5,        # Dropout比率
-        use_batch_norm: bool = True  # 是否使用批归一化
+        use_batch_norm: bool = True, # 是否使用批归一化
+        use_residual: bool = True    # 是否使用残差连接
     ):
         super(GeoGCN, self).__init__()
 
         self.num_layers = num_layers
         self.dropout = dropout
         self.use_batch_norm = use_batch_norm
+        self.use_residual = use_residual
 
         # 构建GCN层列表
         self.convs = nn.ModuleList()
         self.batch_norms = nn.ModuleList()
+        
+        # 输入投影层
+        self.input_proj = nn.Linear(in_channels, hidden_channels) if in_channels != hidden_channels else None
 
-        # 第一层: in_channels -> hidden_channels
-        self.convs.append(GCNConv(in_channels, hidden_channels))
-        if use_batch_norm:
-            self.batch_norms.append(BatchNorm(hidden_channels))
-
-        # 中间层: hidden_channels -> hidden_channels
-        for _ in range(num_layers - 2):
+        # 所有层: hidden_channels -> hidden_channels (除了最后一层)
+        for _ in range(num_layers - 1):
             self.convs.append(GCNConv(hidden_channels, hidden_channels))
             if use_batch_norm:
                 self.batch_norms.append(BatchNorm(hidden_channels))
@@ -63,14 +68,26 @@ class GeoGCN(nn.Module):
         Returns:
             out: 节点分类logits [num_nodes, out_channels]
         """
+        # 输入投影
+        if self.input_proj is not None:
+            x = self.input_proj(x)
+            x = F.relu(x)
+        
         for i in range(self.num_layers - 1):
+            x_input = x  # 保存输入用于残差连接
+            
             x = self.convs[i](x, edge_index, edge_weight)
             if self.use_batch_norm:
                 x = self.batch_norms[i](x)
             x = F.relu(x)
+            
+            # 残差连接
+            if self.use_residual and x.shape == x_input.shape:
+                x = x + x_input
+            
             x = F.dropout(x, p=self.dropout, training=self.training)
 
-        # 最后一层不加激活函数
+        # 最后一层不加激活函数和残差连接
         x = self.convs[-1](x, edge_index, edge_weight)
         return x
 
@@ -83,8 +100,13 @@ class GeoGCN(nn.Module):
 
 class GeoGraphSAGE(nn.Module):
     """
-    基于GraphSAGE的地质建模网络
+    基于GraphSAGE的地质建模网络 (增强版)
     GraphSAGE通过采样和聚合邻居信息，适合处理大规模地质数据
+    
+    优化改进:
+    - 添加残差连接，缓解深层网络训练困难
+    - 使用LayerNorm替代BatchNorm，提升训练稳定性
+    - 添加输入投影层，统一特征维度
     """
 
     def __init__(
@@ -95,27 +117,32 @@ class GeoGraphSAGE(nn.Module):
         num_layers: int = 3,
         dropout: float = 0.5,
         aggr: str = 'mean',          # 聚合方式: 'mean', 'max', 'lstm'
-        use_batch_norm: bool = True
+        use_batch_norm: bool = True,
+        use_residual: bool = True    # 是否使用残差连接
     ):
         super(GeoGraphSAGE, self).__init__()
 
         self.num_layers = num_layers
         self.dropout = dropout
         self.use_batch_norm = use_batch_norm
+        self.use_residual = use_residual
 
         self.convs = nn.ModuleList()
         self.batch_norms = nn.ModuleList()
+        
+        # 输入投影层 - 将输入维度转换为hidden_channels
+        self.input_proj = nn.Linear(in_channels, hidden_channels) if in_channels != hidden_channels else None
 
         # 第一层
-        self.convs.append(SAGEConv(in_channels, hidden_channels, aggr=aggr))
+        self.convs.append(SAGEConv(hidden_channels, hidden_channels, aggr=aggr))
         if use_batch_norm:
-            self.batch_norms.append(BatchNorm(hidden_channels))
+            self.batch_norms.append(nn.LayerNorm(hidden_channels)) # 优化：使用LayerNorm
 
-        # 中间层
+        # 中间层 (带残差连接)
         for _ in range(num_layers - 2):
             self.convs.append(SAGEConv(hidden_channels, hidden_channels, aggr=aggr))
             if use_batch_norm:
-                self.batch_norms.append(BatchNorm(hidden_channels))
+                self.batch_norms.append(nn.LayerNorm(hidden_channels)) # 优化：使用LayerNorm
 
         # 输出层
         self.convs.append(SAGEConv(hidden_channels, out_channels, aggr=aggr))
@@ -133,14 +160,27 @@ class GeoGraphSAGE(nn.Module):
         Returns:
             out: 分类logits [num_nodes, out_channels]
         """
-        # Note: SAGEConv does not use edge_weight; parameter kept for API consistency
+        # 输入投影
+        if self.input_proj is not None:
+            x = self.input_proj(x)
+            x = F.relu(x)
+        
+        # 前面的层使用残差连接
         for i in range(self.num_layers - 1):
+            x_input = x  # 保存输入用于残差连接
+            
             x = self.convs[i](x, edge_index)
             if self.use_batch_norm:
                 x = self.batch_norms[i](x)
             x = F.relu(x)
+            
+            # 残差连接
+            if self.use_residual and x.shape == x_input.shape:
+                x = x + x_input
+            
             x = F.dropout(x, p=self.dropout, training=self.training)
 
+        # 最后一层不使用残差连接
         x = self.convs[-1](x, edge_index)
         return x
 
@@ -153,8 +193,13 @@ class GeoGraphSAGE(nn.Module):
 
 class GeoGAT(nn.Module):
     """
-    基于图注意力网络(GAT)的地质建模网络
+    基于图注意力网络(GAT)的地质建模网络 (增强版)
     使用注意力机制自适应地学习邻居节点的重要性
+    
+    优化改进:
+    - 添加残差连接
+    - 使用LayerNorm替代BatchNorm
+    - 添加输入投影层
     """
 
     def __init__(
@@ -165,28 +210,33 @@ class GeoGAT(nn.Module):
         num_layers: int = 3,
         heads: int = 4,              # 注意力头数
         dropout: float = 0.5,
-        use_batch_norm: bool = True
+        use_batch_norm: bool = True, # 保持参数名兼容，实际可能使用LayerNorm
+        use_residual: bool = True
     ):
         super(GeoGAT, self).__init__()
 
         self.num_layers = num_layers
         self.dropout = dropout
-        self.use_batch_norm = use_batch_norm
+        self.use_residual = use_residual
+        
+        # 输入投影层
+        self.input_proj = nn.Linear(in_channels, hidden_channels * heads)
 
         self.convs = nn.ModuleList()
-        self.batch_norms = nn.ModuleList()
+        self.norms = nn.ModuleList() # 使用LayerNorm或BatchNorm
+        self.skips = nn.ModuleList() # 跳跃连接的线性变换
 
         # 第一层
         self.convs.append(GATConv(in_channels, hidden_channels, heads=heads, dropout=dropout))
-        if use_batch_norm:
-            self.batch_norms.append(BatchNorm(hidden_channels * heads))
+        self.norms.append(nn.LayerNorm(hidden_channels * heads))
+        self.skips.append(nn.Linear(in_channels, hidden_channels * heads))
 
         # 中间层 (输入维度需要乘以heads)
         for _ in range(num_layers - 2):
             self.convs.append(GATConv(hidden_channels * heads, hidden_channels,
                                       heads=heads, dropout=dropout))
-            if use_batch_norm:
-                self.batch_norms.append(BatchNorm(hidden_channels * heads))
+            self.norms.append(nn.LayerNorm(hidden_channels * heads))
+            self.skips.append(nn.Linear(hidden_channels * heads, hidden_channels * heads))
 
         # 输出层 (concat=False, 对多头结果取平均)
         self.convs.append(GATConv(hidden_channels * heads, out_channels,
@@ -194,17 +244,28 @@ class GeoGAT(nn.Module):
 
     def forward(self, x: torch.Tensor, edge_index: torch.Tensor,
                 edge_weight: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """前向传播
+        """前向传播"""
         
-        Note: edge_weight is accepted for API consistency but GATConv does not use it.
-        """
         for i in range(self.num_layers - 1):
+            x_in = x
+            
+            # GAT卷积
             x = self.convs[i](x, edge_index)
-            if self.use_batch_norm:
-                x = self.batch_norms[i](x)
+            
+            # 残差连接 (需要维度匹配)
+            if self.use_residual:
+                if x_in.shape[-1] != x.shape[-1]:
+                    x_in = self.skips[i](x_in)
+                x = x + x_in
+            
+            # 归一化
+            x = self.norms[i](x)
+            
+            # 激活和Dropout
             x = F.elu(x)
             x = F.dropout(x, p=self.dropout, training=self.training)
 
+        # 最后一层
         x = self.convs[-1](x, edge_index)
         return x
 
@@ -330,11 +391,11 @@ class Geo3DGNN(nn.Module):
 
 class EnhancedGeoGNN(nn.Module):
     """
-    增强版地质GNN模型
+    增强版地质GNN模型 (v2)
     特点：
-    1. 深度残差连接
-    2. 多头注意力机制
-    3. 深度特征编码
+    1. 使用GATv2Conv替代GATConv，支持动态注意力
+    2. 利用边权重(距离)作为边特征
+    3. 深度残差连接和LayerNorm
     4. 层次化特征聚合
     """
 
@@ -380,19 +441,16 @@ class EnhancedGeoGNN(nn.Module):
             nn.GELU(),
         )
 
-        # 图注意力层 (多层)
+        # 图注意力层 (多层) - 使用GATv2
         self.gat_layers = nn.ModuleList()
         self.layer_norms = nn.ModuleList()
 
         for i in range(num_layers):
-            if i == 0:
-                self.gat_layers.append(
-                    GATConv(hidden_channels, hidden_channels // heads, heads=heads, dropout=dropout, concat=True)
-                )
-            else:
-                self.gat_layers.append(
-                    GATConv(hidden_channels, hidden_channels // heads, heads=heads, dropout=dropout, concat=True)
-                )
+            # GATv2Conv, edge_dim=1 (距离权重)
+            self.gat_layers.append(
+                GATv2Conv(hidden_channels, hidden_channels // heads, heads=heads, 
+                          dropout=dropout, concat=True, edge_dim=1)
+            )
             self.layer_norms.append(nn.LayerNorm(hidden_channels))
 
         # 残差投影层
@@ -429,10 +487,16 @@ class EnhancedGeoGNN(nn.Module):
         # 融合
         h = self.fusion_layer(torch.cat([spatial_feat, other_feat], dim=1))
 
+        # 准备边特征 (距离权重)
+        edge_attr = None
+        if edge_weight is not None:
+            edge_attr = edge_weight.view(-1, 1)
+
         # 多层GAT with 残差连接和层次聚合
         layer_outputs = []
         for i in range(self.num_layers):
-            h_new = self.gat_layers[i](h, edge_index)
+            # 传入edge_attr
+            h_new = self.gat_layers[i](h, edge_index, edge_attr=edge_attr)
             h_new = self.layer_norms[i](h_new)
             h_new = F.gelu(h_new)
             h_new = F.dropout(h_new, p=self.dropout, training=self.training)
@@ -455,12 +519,138 @@ class EnhancedGeoGNN(nn.Module):
         return torch.argmax(logits, dim=1)
 
 
+class GeoTransformer(nn.Module):
+    """
+    基于Transformer的地质建模网络 (增强版)
+    结合了深度空间编码、TransformerConv和Jumping Knowledge
+    用于捕捉长距离地质依赖并防止过平滑
+    """
+    def __init__(
+        self,
+        in_channels: int,
+        hidden_channels: int = 128,
+        out_channels: int = 10,
+        num_layers: int = 4,
+        dropout: float = 0.3,
+        heads: int = 4
+    ):
+        super(GeoTransformer, self).__init__()
+        self.dropout = dropout
+        self.num_layers = num_layers
+
+        # 1. 深度空间编码器 (处理XYZ坐标)
+        self.spatial_encoder = nn.Sequential(
+            nn.Linear(3, hidden_channels // 2),
+            nn.LayerNorm(hidden_channels // 2),
+            nn.GELU(),
+            nn.Linear(hidden_channels // 2, hidden_channels),
+            nn.LayerNorm(hidden_channels),
+            nn.GELU(),
+        )
+
+        # 2. 特征编码器 (处理其他属性)
+        feature_dim = max(in_channels - 3, 1)
+        self.feature_encoder = nn.Sequential(
+            nn.Linear(feature_dim, hidden_channels // 2),
+            nn.LayerNorm(hidden_channels // 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_channels // 2, hidden_channels),
+            nn.LayerNorm(hidden_channels),
+        )
+
+        # 3. 特征融合层
+        self.fusion_layer = nn.Sequential(
+            nn.Linear(hidden_channels * 2, hidden_channels),
+            nn.LayerNorm(hidden_channels),
+            nn.GELU(),
+        )
+        
+        # 4. Transformer层
+        self.convs = nn.ModuleList()
+        self.norms = nn.ModuleList()
+        
+        for _ in range(num_layers):
+            # beta=True 允许模型学习边权重的缩放
+            self.convs.append(
+                TransformerConv(hidden_channels, hidden_channels // heads, heads=heads,
+                                dropout=dropout, edge_dim=1, beta=True)
+            )
+            self.norms.append(nn.LayerNorm(hidden_channels))
+
+        # 5. 残差投影 (如果维度变化)
+        self.residual_proj = nn.Linear(hidden_channels, hidden_channels)
+
+        # 6. 分类头 (使用Jumping Knowledge，输入维度翻倍)
+        # JK: Concatenate all layers -> hidden_channels * num_layers
+        jk_dim = hidden_channels * num_layers
+        
+        self.classifier = nn.Sequential(
+            nn.Linear(jk_dim, hidden_channels),
+            nn.LayerNorm(hidden_channels),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_channels, hidden_channels // 2),
+            nn.LayerNorm(hidden_channels // 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_channels // 2, out_channels)
+        )
+
+    def forward(self, x: torch.Tensor, edge_index: torch.Tensor,
+                edge_weight: Optional[torch.Tensor] = None) -> torch.Tensor:
+        
+        # 分离坐标和特征
+        coords = x[:, :3]
+        features = x[:, 3:] if x.shape[1] > 3 else torch.zeros(x.shape[0], 1, device=x.device)
+
+        # 编码
+        spatial_feat = self.spatial_encoder(coords)
+        other_feat = self.feature_encoder(features)
+
+        # 融合
+        h = self.fusion_layer(torch.cat([spatial_feat, other_feat], dim=1))
+        
+        # 准备边特征
+        edge_attr = None
+        if edge_weight is not None:
+            edge_attr = edge_weight.view(-1, 1)
+
+        # 保存每一层的输出用于JK
+        layer_outputs = []
+
+        # Transformer 卷积循环
+        for i in range(self.num_layers):
+            h_in = h
+            
+            # TransformerConv
+            h = self.convs[i](h, edge_index, edge_attr=edge_attr)
+            h = self.norms[i](h)
+            h = F.gelu(h)
+            h = F.dropout(h, p=self.dropout, training=self.training)
+            
+            # 残差连接
+            h = h + h_in 
+            
+            layer_outputs.append(h)
+
+        # Jumping Knowledge: 拼接所有层的输出
+        h_final = torch.cat(layer_outputs, dim=1)
+
+        return self.classifier(h_final)
+
+    def predict(self, x: torch.Tensor, edge_index: torch.Tensor,
+                edge_weight: Optional[torch.Tensor] = None) -> torch.Tensor:
+        logits = self.forward(x, edge_index, edge_weight)
+        return torch.argmax(logits, dim=1)
+
+
 def get_model(model_name: str, **kwargs) -> nn.Module:
     """
     模型工厂函数
 
     Args:
-        model_name: 模型名称 ('gcn', 'graphsage', 'gat', 'geo3d', 'enhanced')
+        model_name: 模型名称 ('gcn', 'graphsage', 'gat', 'geo3d', 'enhanced', 'transformer')
         **kwargs: 模型参数
 
     Returns:
@@ -471,7 +661,8 @@ def get_model(model_name: str, **kwargs) -> nn.Module:
         'graphsage': GeoGraphSAGE,
         'gat': GeoGAT,
         'geo3d': Geo3DGNN,
-        'enhanced': EnhancedGeoGNN
+        'enhanced': EnhancedGeoGNN,
+        'transformer': GeoTransformer
     }
 
     if model_name.lower() not in models:
