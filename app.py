@@ -1639,6 +1639,8 @@ def main():
                             # 1. 数据处理
                             status.text("处理层序数据...")
                             layer_processor = LayerDataProcessor(k_neighbors=10)
+                            # 先标准化岩性名称
+                            df = layer_processor.standardize_lithology(df)
                             layer_processor.infer_layer_order(df)
                             thickness_df = layer_processor.extract_thickness_data(df)
                             progress.progress(20)
@@ -1777,7 +1779,7 @@ def main():
 
             # 统计信息
             st.markdown(f"**{model_to_show}统计**")
-            st.dataframe(current_stats, use_container_width=True)
+            st.dataframe(current_stats, width='stretch')
 
             # 切片可视化
             st.subheader("模型切片可视化")
@@ -1801,7 +1803,7 @@ def main():
             with slice_col2:
                 slice_data, slice_coords, slice_info = current_model.get_slice(slice_axis, position=slice_pos)
                 fig_slice = create_slice_figure(slice_data, slice_coords, slice_axis, slice_pos, lithology_names, model_to_show)
-                st.plotly_chart(fig_slice, use_container_width=True)
+                st.plotly_chart(fig_slice, width='stretch')
 
             # 三维可视化部分
             st.subheader("三维地质体模型")
@@ -1928,39 +1930,83 @@ def main():
                     height=700
                 )
 
-                st.plotly_chart(fig_3d_model, use_container_width=True)
+                st.plotly_chart(fig_3d_model, width='stretch')
 
             # 导出按钮
             st.subheader("导出模型")
-            col1, col2, col3, col4 = st.columns(4)
 
             project_root = os.path.dirname(os.path.abspath(__file__))
             output_dir = os.path.join(project_root, 'output')
             os.makedirs(output_dir, exist_ok=True)
 
+            # 第一行：VTK格式导出
+            st.markdown("**VTK格式导出** (可用ParaView打开)")
+            col1, col2, col3 = st.columns(3)
+
             with col1:
-                if has_traditional and st.button("📥 导出传统模型 VTK"):
+                if has_layer and st.button("📥 导出层序累加模型 VTK", key="export_layer_vtk"):
+                    vtk_path = os.path.join(output_dir, 'layer_model.vtk')
+                    st.session_state.layer_model.export_vtk(vtk_path, st.session_state.layer_processor.layer_order)
+                    st.success(f"已保存: {vtk_path}")
+
+            with col2:
+                if has_traditional and st.button("📥 导出传统模型 VTK", key="export_trad_vtk"):
                     vtk_path = os.path.join(output_dir, 'geological_model_traditional.vtk')
                     st.session_state.geo_model.export_vtk(vtk_path, result['lithology_classes'])
                     st.success(f"已保存: {vtk_path}")
 
-            with col2:
-                if has_gnn and st.button("📥 导出GNN模型 VTK"):
+            with col3:
+                if has_gnn and st.button("📥 导出GNN模型 VTK", key="export_gnn_vtk"):
                     vtk_path = os.path.join(output_dir, 'geological_model_gnn.vtk')
                     st.session_state.gnn_model.export_vtk(vtk_path, result['lithology_classes'])
                     st.success(f"已保存: {vtk_path}")
 
-            with col3:
-                if has_traditional and st.button("📥 导出传统模型 NumPy"):
+            # 第二行：NumPy格式导出
+            st.markdown("**NumPy格式导出** (可用Python读取)")
+            col1, col2, col3 = st.columns(3)
+
+            with col1:
+                if has_layer and st.button("📥 导出层序累加模型 NumPy", key="export_layer_npz"):
+                    npz_path = os.path.join(output_dir, 'layer_model.npz')
+                    st.session_state.layer_model.export_numpy(npz_path)
+                    st.success(f"已保存: {npz_path}")
+
+            with col2:
+                if has_traditional and st.button("📥 导出传统模型 NumPy", key="export_trad_npz"):
                     npz_path = os.path.join(output_dir, 'geological_model_traditional.npz')
                     st.session_state.geo_model.export_numpy(npz_path)
                     st.success(f"已保存: {npz_path}")
 
-            with col4:
-                if has_gnn and st.button("📥 导出GNN模型 NumPy"):
+            with col3:
+                if has_gnn and st.button("📥 导出GNN模型 NumPy", key="export_gnn_npz"):
                     npz_path = os.path.join(output_dir, 'geological_model_gnn.npz')
                     st.session_state.gnn_model.export_numpy(npz_path)
                     st.success(f"已保存: {npz_path}")
+
+            # 第三行：统计数据导出
+            st.markdown("**统计数据导出**")
+            col1, col2, col3 = st.columns(3)
+
+            with col1:
+                if has_layer and st.button("📥 导出层序累加模型统计", key="export_layer_stats"):
+                    stats_path = os.path.join(output_dir, 'layer_model_stats.csv')
+                    stats = st.session_state.layer_model.get_statistics(st.session_state.layer_processor.layer_order)
+                    stats.to_csv(stats_path, index=False, encoding='utf-8-sig')
+                    st.success(f"已保存: {stats_path}")
+
+            with col2:
+                if has_traditional and st.button("📥 导出传统模型统计", key="export_trad_stats"):
+                    stats_path = os.path.join(output_dir, 'traditional_model_stats.csv')
+                    stats = st.session_state.geo_model.get_statistics(result['lithology_classes'])
+                    stats.to_csv(stats_path, index=False, encoding='utf-8-sig')
+                    st.success(f"已保存: {stats_path}")
+
+            with col3:
+                if has_gnn and st.button("📥 导出GNN模型统计", key="export_gnn_stats"):
+                    stats_path = os.path.join(output_dir, 'gnn_model_stats.csv')
+                    stats = st.session_state.gnn_model.get_statistics(result['lithology_classes'])
+                    stats.to_csv(stats_path, index=False, encoding='utf-8-sig')
+                    st.success(f"已保存: {stats_path}")
 
             st.info("提示: 使用 ParaView 打开 VTK 文件进行三维可视化")
 

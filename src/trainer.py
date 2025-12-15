@@ -211,8 +211,9 @@ class GeoModelTrainer:
         self.learning_rate = learning_rate
         if scheduler_type == 'plateau':
             # 稳定策略：基于验证准确率调整，patience适中
+            # 注意: PyTorch 2.x 中 verbose 参数已弃用，使用 get_last_lr() 替代
             self.scheduler = ReduceLROnPlateau(
-                self.optimizer, mode='max', factor=0.5, patience=40, min_lr=1e-6, verbose=True
+                self.optimizer, mode='max', factor=0.5, patience=40, min_lr=1e-6
             )
         elif scheduler_type == 'cosine':
             self.scheduler = CosineAnnealingLR(self.optimizer, T_max=100, eta_min=1e-6)

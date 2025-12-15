@@ -272,7 +272,8 @@ class BalancedBatchSampler:
                 selected = np.random.choice(indices, self.samples_per_class, replace=False)
             else:
                 selected = np.random.choice(indices, self.samples_per_class, replace=True)
-            batch.extend(selected)
+            # 转换为 Python int，确保与 PyTorch DataLoader 兼容
+            batch.extend([int(idx) for idx in selected])
 
         np.random.shuffle(batch)
         return iter(batch)

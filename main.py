@@ -3,6 +3,11 @@
 提供命令行接口：训练、建模、可视化
 
 针对敏东矿区钻孔数据格式优化
+
+建模方法：
+- traditional: 传统层面插值建模
+- gnn: GNN直接预测建模（分类）
+- layer: 层序累加建模（推荐，GNN预测厚度回归）
 """
 
 import argparse
@@ -21,6 +26,10 @@ from src.data_loader import BoreholeDataProcessor, GridInterpolator
 from src.trainer import GeoModelTrainer, compute_class_weights
 from src.modeling import GeoModel3D, build_geological_model
 from src.gnn_modeling import DirectPredictionModeling, build_gnn_geological_model
+from src.layer_modeling import (
+    LayerDataProcessor, GNNThicknessPredictor, ThicknessTrainer,
+    LayerBasedGeologicalModeling, build_layer_based_model
+)
 
 
 def run_full_pipeline(
@@ -33,7 +42,7 @@ def run_full_pipeline(
     k_neighbors: int = 12,            # 适中的k值，避免过平滑
     grid_resolution: tuple = (50, 50, 50),
     output_dir: str = 'output',
-    modeling_method: str = 'both'     # 'traditional', 'gnn', 'both'
+    modeling_method: str = 'layer'    # 'traditional', 'gnn', 'layer', 'all'
 ):
     """
     完整流程: 数据加载 → 训练 → 建模 → 导出
@@ -162,9 +171,11 @@ def run_full_pipeline(
 
     geo_model = None
     gnn_model = None
+    layer_model = None
+    layer_processor = None
 
     # 传统插值建模
-    if modeling_method in ['traditional', 'both']:
+    if modeling_method in ['traditional', 'all']:
         print("\n[方法1] 传统层面插值建模...")
         geo_model = build_geological_model(
             trainer=trainer,
@@ -176,7 +187,7 @@ def run_full_pipeline(
         )
 
     # GNN直接预测建模
-    if modeling_method in ['gnn', 'both']:
+    if modeling_method in ['gnn', 'all']:
         print("\n[方法2] GNN直接预测建模...")
         gnn_model = build_gnn_geological_model(
             trainer=trainer,
@@ -190,6 +201,23 @@ def run_full_pipeline(
             smooth_sigma=0.5
         )
 
+    # 层序累加建模（推荐）
+    if modeling_method in ['layer', 'all']:
+        print("\n[方法3] 层序累加建模（推荐）...")
+        print("  核心思想: 逐层累加厚度构建曲面，GNN预测厚度（回归）")
+        print("  优势: 无岩体冲突、无空缺区域、符合地质沉积规律")
+
+        layer_model, layer_processor, thickness_trainer = build_layer_based_model(
+            df=df,
+            resolution=grid_resolution,
+            use_gnn=False,  # 使用传统插值，不训练厚度GNN
+            epochs=min(epochs, 300),  # 厚度预测训练轮数
+            hidden_dim=hidden_dim,
+            num_gnn_layers=num_layers,
+            output_dir=output_dir,
+            verbose=True
+        )
+
     # 保存预处理器
     processor.save_preprocessor(os.path.join(output_dir, 'preprocessor.json'))
 
@@ -200,27 +228,163 @@ def run_full_pipeline(
     print(f"\n输出文件:")
     print(f"  模型权重: {output_dir}/models/best_model.pt")
     print(f"  钻孔预测: {output_dir}/predictions.csv")
-    if modeling_method in ['traditional', 'both']:
+    if modeling_method in ['traditional', 'all']:
         print(f"\n  [传统方法]")
         print(f"    三维模型(VTK): {output_dir}/geological_model.vtk (如有)")
         print(f"    三维模型(NumPy): {output_dir}/geological_model.npz")
         print(f"    体积统计: {output_dir}/model_statistics.csv")
-    if modeling_method in ['gnn', 'both']:
+    if modeling_method in ['gnn', 'all']:
         print(f"\n  [GNN直接预测]")
         print(f"    三维模型(VTK): {output_dir}/gnn_model_direct.vtk")
         print(f"    三维模型(NumPy): {output_dir}/gnn_model_direct.npz")
         print(f"    体积统计: {output_dir}/gnn_model_direct_stats.csv")
+    if modeling_method in ['layer', 'all']:
+        print(f"\n  [层序累加建模] (推荐)")
+        print(f"    三维模型(VTK): {output_dir}/layer_model.vtk")
+        print(f"    三维模型(NumPy): {output_dir}/layer_model.npz")
+        print(f"    体积统计: {output_dir}/layer_model_stats.csv")
+        print(f"    厚度预测模型: {output_dir}/thickness_model.pt")
     print(f"\n提示: VTK文件可用ParaView打开进行三维可视化")
 
-    return trainer, data, result, geo_model, gnn_model
+    return trainer, data, result, geo_model, gnn_model, layer_model
 
 
 def run_demo():
     """运行演示 (使用默认参数)"""
     return run_full_pipeline(
         grid_resolution=(40, 40, 40),
-        epochs=200
+        epochs=200,
+        modeling_method='layer'  # 使用推荐的层序累加建模
     )
+
+
+def run_layer_based_modeling(
+    data_dir: str = None,
+    hidden_dim: int = 128,
+    num_layers: int = 4,
+    epochs: int = 300,
+    sample_interval: float = 1.0,
+    k_neighbors: int = 10,
+    grid_resolution: tuple = (50, 50, 50),
+    use_gnn: bool = True,
+    smooth_surfaces: bool = True,
+    smooth_sigma: float = 1.0,
+    output_dir: str = 'output'
+):
+    """
+    层序累加地质建模（独立流程）
+
+    核心思想：
+    1. 确定底面作为基准
+    2. 从最深层开始，逐层累加厚度构建曲面
+    3. GNN用于预测每层厚度（回归问题）
+    4. 曲面之间的空间即为该层岩体
+
+    优势：
+    - 无岩体冲突（数学上不可能）
+    - 无空缺区域（完全填充）
+    - 符合地质沉积规律
+    - 曲面连续光滑
+
+    Args:
+        data_dir: 钻孔数据目录
+        hidden_dim: GNN隐藏层维度
+        num_layers: GNN层数
+        epochs: 厚度预测模型训练轮数
+        sample_interval: 钻孔采样间隔
+        k_neighbors: 图构建的K邻居数
+        grid_resolution: 网格分辨率 (nx, ny, nz)
+        use_gnn: 是否使用GNN预测厚度
+        smooth_surfaces: 是否平滑曲面
+        smooth_sigma: 平滑系数
+        output_dir: 输出目录
+
+    Returns:
+        layer_model: 层序累加地质模型
+        layer_processor: 层序数据处理器
+        thickness_trainer: 厚度预测训练器
+    """
+    print("=" * 70)
+    print("层序累加地质建模")
+    print("=" * 70)
+    print("\n核心思想:")
+    print("  1. 确定底面作为基准")
+    print("  2. 从最深层开始，逐层累加厚度构建曲面")
+    print("  3. GNN预测每层厚度（回归问题，非分类）")
+    print("  4. 曲面之间的空间即为该层岩体")
+    print("\n优势:")
+    print("  - 无岩体冲突（数学上保证）")
+    print("  - 无空缺区域（完全填充）")
+    print("  - 符合地质沉积规律")
+
+    # 获取项目根目录
+    project_root = os.path.dirname(os.path.abspath(__file__))
+    if data_dir is None:
+        data_dir = os.path.join(project_root, 'data')
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    # ==================== 1. 数据加载 ====================
+    print("\n" + "=" * 70)
+    print("阶段 1/3: 数据加载")
+    print("=" * 70)
+
+    processor = BoreholeDataProcessor(
+        k_neighbors=k_neighbors,
+        sample_interval=sample_interval
+    )
+
+    df = processor.load_all_boreholes(
+        data_dir=data_dir,
+        surface_elevation=0.0
+    )
+
+    print(f"\n数据概览:")
+    print(f"  钻孔数量: {df['borehole_id'].nunique()}")
+    print(f"  采样点数: {len(df)}")
+    print(f"  岩性种类: {df['lithology'].nunique()}")
+    print(f"  X范围: {df['x'].min():.1f} ~ {df['x'].max():.1f} m")
+    print(f"  Y范围: {df['y'].min():.1f} ~ {df['y'].max():.1f} m")
+    print(f"  Z范围: {df['z'].min():.1f} ~ {df['z'].max():.1f} m")
+
+    # ==================== 2. 层序累加建模 ====================
+    print("\n" + "=" * 70)
+    print("阶段 2/3: 层序累加建模")
+    print("=" * 70)
+
+    layer_model, layer_processor, thickness_trainer = build_layer_based_model(
+        df=df,
+        resolution=grid_resolution,
+        use_gnn=use_gnn,
+        epochs=epochs,
+        hidden_dim=hidden_dim,
+        num_gnn_layers=num_layers,
+        output_dir=output_dir,
+        verbose=True
+    )
+
+    # ==================== 3. 统计与输出 ====================
+    print("\n" + "=" * 70)
+    print("阶段 3/3: 统计与输出")
+    print("=" * 70)
+
+    stats = layer_model.get_statistics(layer_processor.layer_order)
+    print("\n模型统计:")
+    print(stats.to_string(index=False))
+
+    # ==================== 完成 ====================
+    print("\n" + "=" * 70)
+    print("层序累加建模完成!")
+    print("=" * 70)
+    print(f"\n输出文件:")
+    print(f"  三维模型(VTK): {output_dir}/layer_model.vtk")
+    print(f"  三维模型(NumPy): {output_dir}/layer_model.npz")
+    print(f"  体积统计: {output_dir}/layer_model_stats.csv")
+    if use_gnn:
+        print(f"  厚度预测模型: {output_dir}/thickness_model.pt")
+    print(f"\n提示: VTK文件可用ParaView打开进行三维可视化")
+
+    return layer_model, layer_processor, thickness_trainer
 
 
 def run_training_only(
@@ -338,6 +502,9 @@ def main():
   快速演示:
     python main.py demo
 
+  层序累加建模 (推荐):
+    python main.py layer --data ./data --resolution 50 50 50 --epochs 300
+
   仅训练模型:
     python main.py train --data ./data --model graphsage --epochs 300
 
@@ -347,11 +514,19 @@ def main():
   启动可视化界面:
     python main.py webapp
 
+建模方法说明:
+============
+  traditional - 传统层面插值建模
+  gnn         - GNN直接预测岩性（分类）
+  layer       - 层序累加建模（推荐，GNN预测厚度回归）
+  all         - 运行所有建模方法
+
 输出文件说明:
 ============
   geological_model.vtk  - VTK格式，可用ParaView打开
   geological_model.npz  - NumPy格式，可用Python读取
-  geological_model.csv  - CSV格式，通用表格格式
+  layer_model.vtk       - 层序累加模型VTK格式
+  layer_model.npz       - 层序累加模型NumPy格式
   model_statistics.csv  - 岩性体积统计
         """
     )
@@ -359,7 +534,7 @@ def main():
     subparsers = parser.add_subparsers(dest='command', help='可用命令')
 
     # demo命令
-    subparsers.add_parser('demo', help='运行完整演示 (训练+建模)')
+    subparsers.add_parser('demo', help='运行完整演示 (训练+层序累加建模)')
 
     # webapp命令
     subparsers.add_parser('webapp', help='启动可视化Web界面')
@@ -377,9 +552,23 @@ def main():
     run_parser.add_argument('--resolution', type=int, nargs=3, default=[50, 50, 50],
                            help='网格分辨率 (nx ny nz)')
     run_parser.add_argument('--output', type=str, default='output')
-    run_parser.add_argument('--modeling-method', type=str, default='both',
-                           choices=['traditional', 'gnn', 'both'],
-                           help='建模方法: traditional=传统插值, gnn=GNN直接预测, both=两者都运行')
+    run_parser.add_argument('--modeling-method', type=str, default='layer',
+                           choices=['traditional', 'gnn', 'layer', 'all'],
+                           help='建模方法: traditional=传统插值, gnn=GNN直接预测, layer=层序累加(推荐), all=所有方法')
+
+    # layer命令 (层序累加建模)
+    layer_parser = subparsers.add_parser('layer', help='层序累加地质建模（推荐）')
+    layer_parser.add_argument('--data', type=str, default='./data', help='数据目录')
+    layer_parser.add_argument('--hidden', type=int, default=128, help='GNN隐藏层维度')
+    layer_parser.add_argument('--layers', type=int, default=4, help='GNN层数')
+    layer_parser.add_argument('--epochs', type=int, default=300, help='厚度预测模型训练轮数')
+    layer_parser.add_argument('--sample-interval', type=float, default=1.0, help='采样间隔')
+    layer_parser.add_argument('--k-neighbors', type=int, default=10, help='K邻居数')
+    layer_parser.add_argument('--resolution', type=int, nargs=3, default=[50, 50, 50],
+                             help='网格分辨率 (nx ny nz)')
+    layer_parser.add_argument('--no-gnn', action='store_true', help='不使用GNN，使用传统插值')
+    layer_parser.add_argument('--smooth', type=float, default=1.0, help='曲面平滑系数')
+    layer_parser.add_argument('--output', type=str, default='output')
 
     # train命令 (仅训练)
     train_parser = subparsers.add_parser('train', help='仅训练模型')
@@ -432,6 +621,20 @@ def main():
             epochs=args.epochs,
             sample_interval=args.sample_interval,
             k_neighbors=args.k_neighbors,
+            output_dir=args.output
+        )
+
+    elif args.command == 'layer':
+        run_layer_based_modeling(
+            data_dir=args.data,
+            hidden_dim=args.hidden,
+            num_layers=args.layers,
+            epochs=args.epochs,
+            sample_interval=args.sample_interval,
+            k_neighbors=args.k_neighbors,
+            grid_resolution=tuple(args.resolution),
+            use_gnn=not args.no_gnn,
+            smooth_sigma=args.smooth,
             output_dir=args.output
         )
 

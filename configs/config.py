@@ -133,3 +133,106 @@ def get_config(config_type: str = "all") -> dict:
         return configs[config_type]
     else:
         raise ValueError(f"未知配置类型: {config_type}")
+
+
+def validate_config(config: dict = None) -> bool:
+    """
+    验证配置参数的有效性
+
+    Args:
+        config: 要验证的配置字典，如果为None则验证所有默认配置
+
+    Returns:
+        是否验证通过
+
+    Raises:
+        ValueError: 当参数不合法时
+    """
+    if config is None:
+        config = get_config("all")
+
+    errors = []
+
+    # 验证数据配置
+    data_cfg = config.get("data", DATA_CONFIG)
+    if data_cfg.get("k_neighbors", 0) < 1:
+        errors.append("k_neighbors 必须大于等于1")
+    if data_cfg.get("test_size", 0) < 0 or data_cfg.get("test_size", 0) > 1:
+        errors.append("test_size 必须在 0-1 之间")
+    if data_cfg.get("val_size", 0) < 0 or data_cfg.get("val_size", 0) > 1:
+        errors.append("val_size 必须在 0-1 之间")
+    if data_cfg.get("test_size", 0) + data_cfg.get("val_size", 0) >= 1:
+        errors.append("test_size + val_size 必须小于 1")
+    if data_cfg.get("graph_type") not in ["knn", "radius", "delaunay"]:
+        errors.append("graph_type 必须是 'knn', 'radius' 或 'delaunay'")
+
+    # 验证模型配置
+    model_cfg = config.get("model", MODEL_CONFIG)
+    if model_cfg.get("hidden_channels", 0) < 1:
+        errors.append("hidden_channels 必须大于等于1")
+    if model_cfg.get("num_layers", 0) < 1:
+        errors.append("num_layers 必须大于等于1")
+    if not (0 <= model_cfg.get("dropout", 0) <= 1):
+        errors.append("dropout 必须在 0-1 之间")
+    if model_cfg.get("gat_heads", 0) < 1:
+        errors.append("gat_heads 必须大于等于1")
+    if model_cfg.get("model_type") not in ["gcn", "gat", "graphsage", "sage", "enhanced"]:
+        errors.append("model_type 必须是 'gcn', 'gat', 'graphsage', 'sage' 或 'enhanced'")
+
+    # 验证训练配置
+    train_cfg = config.get("train", TRAIN_CONFIG)
+    if train_cfg.get("learning_rate", 0) <= 0:
+        errors.append("learning_rate 必须大于0")
+    if train_cfg.get("weight_decay", -1) < 0:
+        errors.append("weight_decay 必须大于等于0")
+    if train_cfg.get("epochs", 0) < 1:
+        errors.append("epochs 必须大于等于1")
+    if train_cfg.get("early_stopping_patience", 0) < 1:
+        errors.append("early_stopping_patience 必须大于等于1")
+    if train_cfg.get("focal_gamma", -1) < 0:
+        errors.append("focal_gamma 必须大于等于0")
+    if not (0 <= train_cfg.get("label_smoothing", 0) < 1):
+        errors.append("label_smoothing 必须在 0-1 之间")
+    if not (0 <= train_cfg.get("augment_noise_std", 0) <= 1):
+        errors.append("augment_noise_std 必须在 0-1 之间")
+    if not (0 <= train_cfg.get("augment_edge_drop", 0) <= 1):
+        errors.append("augment_edge_drop 必须在 0-1 之间")
+    if not (0 < train_cfg.get("ema_decay", 0) < 1):
+        errors.append("ema_decay 必须在 0-1 之间 (不含边界)")
+    if train_cfg.get("loss_type") not in ["ce", "focal", "label_smoothing"]:
+        errors.append("loss_type 必须是 'ce', 'focal' 或 'label_smoothing'")
+    if train_cfg.get("optimizer") not in ["adam", "adamw"]:
+        errors.append("optimizer 必须是 'adam' 或 'adamw'")
+    if train_cfg.get("scheduler") not in ["plateau", "cosine", "step", "onecycle", "none", None]:
+        errors.append("scheduler 必须是 'plateau', 'cosine', 'step', 'onecycle' 或 'none'")
+
+    # 验证可视化配置
+    vis_cfg = config.get("vis", VIS_CONFIG)
+    resolution = vis_cfg.get("grid_resolution", (50, 50, 50))
+    if not (isinstance(resolution, tuple) and len(resolution) == 3):
+        errors.append("grid_resolution 必须是长度为3的元组")
+    elif any(r < 1 for r in resolution):
+        errors.append("grid_resolution 中的每个值必须大于等于1")
+    if not (0 < vis_cfg.get("default_opacity", 0.5) <= 1):
+        errors.append("default_opacity 必须在 0-1 之间")
+
+    if errors:
+        error_msg = "配置验证失败:\n" + "\n".join(f"  - {e}" for e in errors)
+        raise ValueError(error_msg)
+
+    return True
+
+
+def print_config(config_type: str = "all"):
+    """打印配置内容"""
+    config = get_config(config_type)
+
+    if config_type == "all":
+        for name, cfg in config.items():
+            print(f"\n{'='*20} {name.upper()} {'='*20}")
+            for k, v in cfg.items():
+                print(f"  {k}: {v}")
+    else:
+        print(f"\n{'='*20} {config_type.upper()} {'='*20}")
+        for k, v in config.items():
+            print(f"  {k}: {v}")

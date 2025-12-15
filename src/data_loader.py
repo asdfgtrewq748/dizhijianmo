@@ -62,13 +62,24 @@ class BoreholeDataProcessor:
         Returns:
             df: 包含钻孔名和坐标的DataFrame
         """
+        if not os.path.exists(coord_file):
+            raise FileNotFoundError(f"坐标文件不存在: {coord_file}")
+
         # 尝试不同编码读取
-        for encoding in ['utf-8', 'gbk', 'gb2312', 'utf-8-sig']:
+        df = None
+        last_error = None
+        for encoding in ['utf-8', 'gbk', 'gb2312', 'utf-8-sig', 'latin-1']:
             try:
                 df = pd.read_csv(coord_file, encoding=encoding)
                 break
-            except UnicodeDecodeError:
+            except UnicodeDecodeError as e:
+                last_error = e
                 continue
+            except Exception as e:
+                raise IOError(f"读取坐标文件失败: {coord_file}, 错误: {e}")
+
+        if df is None:
+            raise IOError(f"无法以任何编码读取文件 {coord_file}: {last_error}")
 
         # 标准化列名
         df.columns = df.columns.str.strip()
@@ -85,6 +96,12 @@ class BoreholeDataProcessor:
                 col_mapping[col] = 'y'
 
         df = df.rename(columns=col_mapping)
+
+        # 验证必需列
+        required_cols = ['borehole_id', 'x', 'y']
+        missing_cols = [col for col in required_cols if col not in df.columns]
+        if missing_cols:
+            raise ValueError(f"坐标文件缺少必需列: {missing_cols}, 现有列: {list(df.columns)}")
 
         print(f"加载坐标文件: {len(df)} 个钻孔")
         return df
@@ -103,13 +120,27 @@ class BoreholeDataProcessor:
         Returns:
             df: 包含采样点的DataFrame
         """
+        if not os.path.exists(borehole_file):
+            print(f"警告: 钻孔文件不存在: {borehole_file}")
+            return pd.DataFrame()
+
         # 尝试不同编码读取
-        for encoding in ['utf-8', 'gbk', 'gb2312', 'utf-8-sig']:
+        df = None
+        last_error = None
+        for encoding in ['utf-8', 'gbk', 'gb2312', 'utf-8-sig', 'latin-1']:
             try:
                 df = pd.read_csv(borehole_file, encoding=encoding)
                 break
-            except UnicodeDecodeError:
+            except UnicodeDecodeError as e:
+                last_error = e
                 continue
+            except Exception as e:
+                print(f"警告: 读取 {borehole_file} 失败: {e}")
+                return pd.DataFrame()
+
+        if df is None:
+            print(f"警告: 无法以任何编码读取 {borehole_file}: {last_error}")
+            return pd.DataFrame()
 
         # 清理列名
         df.columns = df.columns.str.strip()
@@ -279,53 +310,20 @@ class BoreholeDataProcessor:
 
         return combined_df
 
-    def standardize_lithology(self, df: pd.DataFrame) -> pd.DataFrame:
+    def standardize_lithology(self, df: pd.DataFrame, merge_coal: bool = True) -> pd.DataFrame:
         """
-        标准化岩性名称 (处理同义词、别名等)
+        标准化岩性名称 (处理乱码、统一命名格式)
 
         Args:
             df: 包含lithology列的DataFrame
+            merge_coal: 是否合并煤层（默认True，用于GNN分类训练以减少类别数）
+                        设为False时保留独立煤层名称（用于层序建模）
 
         Returns:
             df: 标准化后的DataFrame
         """
-        # 岩性标准化映射表
-        lithology_mapping = {
-            # 煤层
-            '煤': '煤',
-            'ú': '煤',  # 乱码修复
-            # 砂岩类
-            '细砂岩': '细砂岩',
-            'ϸɰ��': '细砂岩',
-            '中砂岩': '中砂岩',
-            '粗砂岩': '粗砂岩',
-            '粉砂岩': '粉砂岩',
-            '��ɰ��': '粉砂岩',
-            # 砾岩类
-            '中砾岩': '砾岩',
-            '粗砾岩': '砾岩',
-            '细砾岩': '砾岩',
-            '砾岩': '砾岩',
-            # 泥岩类
-            '泥�ite': '泥岩',
-            '泥岩': '泥岩',
-            '砂质泥岩': '砂质泥岩',
-            'ɰ������': '砂质泥岩',
-            '炭质泥岩': '炭质泥岩',
-            '̿������': '炭质泥岩',
-            # 其他
-            '腐殖土': '腐殖土',
-            '��ֳ��': '腐殖土',
-            '砂砾岩': '砂砾岩',
-            'ɰ����': '砂砾岩',
-            '页岩': '页岩',
-            '灰岩': '灰岩',
-            '砂岩': '中砂岩',
-            '表土': '腐殖土',
-            '黄土': '粘土',
-            '粘土': '粘土',
-            '黏土': '粘土',
-        }
+        # 保存merge_coal标志供内部函数使用
+        _merge_coal = merge_coal
 
         # 创建一个清理后的岩性列
         def clean_lithology(name):
@@ -334,54 +332,106 @@ class BoreholeDataProcessor:
 
             name = str(name).strip()
 
-            # 先尝试直接映射
-            if name in lithology_mapping:
-                return lithology_mapping[name]
+            # ========== 修复乱码 ==========
+            # 常见乱码映射（GBK读取UTF-8或反过来导致的乱码）
+            garbled_fixes = {
+                'ú': '煤',
+                'ϸɰ��': '细砂岩',
+                '��ɰ��': '粉砂岩',
+                'ɰ������': '砂质泥岩',
+                '̿������': '炭质泥岩',
+                '��ֳ��': '腐殖土',
+                'ɰ����': '砂砾岩',
+                '����': '泥岩',
+                '������': '砾岩',
+                '��ɰ': '粉砂',
+                'ϸɰ': '细砂',
+                '̿��': '炭质',
+            }
 
-            # 尝试包含关系匹配
-            for key, value in lithology_mapping.items():
-                if key in name or name in key:
-                    return value
+            # 尝试修复乱码
+            for garbled, fix in garbled_fixes.items():
+                if garbled in name:
+                    name = name.replace(garbled, fix)
 
-            # 基于关键字匹配
-            if '煤' in name or 'ú' in name:
-                return '煤'
-            elif '泥' in name or '��' in name:
-                if '炭' in name or '̿' in name:
-                    return '炭质泥岩'
-                elif '砂' in name or 'ɰ' in name:
-                    return '砂质泥岩'
+            # ========== 煤层处理 ==========
+            if '煤' in name:
+                if _merge_coal:
+                    # 合并所有煤层为单一类别（用于GNN分类，减少类别数提高准确率）
+                    return '煤'
                 else:
-                    return '泥岩'
-            elif '砂' in name or 'ɰ' in name:
-                if '粉' in name or '��' in name:
+                    # 保留独立煤层编号（用于层序建模）
+                    return name.strip()
+
+            # ========== 非煤岩性标准化 ==========
+            # 砂岩类 - 保留粒度区分
+            if '砂岩' in name or ('砂' in name and '砾' not in name and '泥' not in name):
+                if '粉' in name:
                     return '粉砂岩'
-                elif '细' in name or 'ϸ' in name:
+                elif '细' in name:
                     return '细砂岩'
                 elif '中' in name:
                     return '中砂岩'
                 elif '粗' in name:
                     return '粗砂岩'
-                elif '砾' in name or '��' in name:
-                    return '砂砾岩'
+                elif '质' in name and '泥' in name:
+                    return '砂质泥岩'
                 else:
                     return '砂岩'
-            elif '砾' in name or '��' in name:
-                return '砾岩'
-            elif '腐' in name or 'ֳ' in name:
+
+            # 砾岩类 - 保留粒度区分
+            if '砾岩' in name or '砾' in name:
+                if '砂' in name:
+                    return '砂砾岩'
+                elif '细' in name:
+                    return '细砾岩'
+                elif '中' in name:
+                    return '中砾岩'
+                elif '粗' in name:
+                    return '粗砾岩'
+                else:
+                    return '砾岩'
+
+            # 泥岩类
+            if '泥岩' in name or '泥' in name:
+                if '炭' in name or '碳' in name:
+                    return '炭质泥岩'
+                elif '砂' in name:
+                    return '砂质泥岩'
+                else:
+                    return '泥岩'
+
+            # 其他岩性
+            if '腐殖' in name or '表土' in name:
                 return '腐殖土'
-            elif '页' in name:
+            elif '粘土' in name or '黏土' in name or '黄土' in name:
+                return '粘土'
+            elif '页岩' in name:
                 return '页岩'
-            elif '灰' in name:
+            elif '灰岩' in name:
                 return '灰岩'
-            else:
-                return name  # 保留原名
+
+            # 无法识别的保留原名
+            return name
 
         df = df.copy()
         df['lithology'] = df['lithology'].apply(clean_lithology)
 
-        print(f"\n标准化后的岩性类别:")
-        print(df['lithology'].value_counts())
+        print(f"\n标准化后的岩性类别 ({df['lithology'].nunique()}种):")
+        value_counts = df['lithology'].value_counts()
+        # 分类显示：煤层和非煤层
+        coal_types = [v for v in value_counts.index if '煤' in str(v)]
+        non_coal_types = [v for v in value_counts.index if '煤' not in str(v)]
+
+        if coal_types:
+            print(f"  煤层 ({len(coal_types)}种):")
+            for ct in coal_types:
+                print(f"    {ct}: {value_counts[ct]}个采样点")
+
+        if non_coal_types:
+            print(f"  非煤岩层 ({len(non_coal_types)}种):")
+            for nct in non_coal_types:
+                print(f"    {nct}: {value_counts[nct]}个采样点")
 
         return df
 
@@ -609,16 +659,39 @@ class BoreholeDataProcessor:
         n_nodes = len(df)
         indices = np.arange(n_nodes)
 
+        # 检查是否可以使用分层采样（每个类至少需要2个样本）
+        unique_labels, label_counts = np.unique(labels_encoded, return_counts=True)
+        min_count = label_counts.min()
+        can_stratify = min_count >= 2
+
+        if not can_stratify:
+            # 有些类别样本太少，不使用分层采样
+            rare_classes = [self.lithology_classes[i] for i, c in enumerate(label_counts) if c < 2]
+            print(f"\n警告: 以下岩性样本太少，无法分层采样: {rare_classes}")
+            print("使用随机采样代替分层采样")
+            stratify_labels = None
+        else:
+            stratify_labels = labels_encoded
+
         # 先划分出测试集
         train_val_idx, test_idx = train_test_split(
-            indices, test_size=test_size, random_state=42, stratify=labels_encoded
+            indices, test_size=test_size, random_state=42, stratify=stratify_labels
         )
 
         # 再从训练+验证集中划分验证集
         val_ratio = val_size / (1 - test_size)
+        if can_stratify:
+            # 检查训练+验证集中是否仍可分层
+            train_val_labels = labels_encoded[train_val_idx]
+            _, tv_counts = np.unique(train_val_labels, return_counts=True)
+            can_stratify_tv = tv_counts.min() >= 2
+            stratify_tv = train_val_labels if can_stratify_tv else None
+        else:
+            stratify_tv = None
+
         train_idx, val_idx = train_test_split(
             train_val_idx, test_size=val_ratio, random_state=42,
-            stratify=labels_encoded[train_val_idx]
+            stratify=stratify_tv
         )
 
         # 创建掩码

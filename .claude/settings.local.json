@@ -29,7 +29,18 @@
       "Bash(C:UsersAdministratoranaconda3envsgeomodelpython.exe -m py_compile D:xiangmudizhijianmoapp.py)",
       "Bash(cmd /c \"cd /d D:\\xiangmu\\dizhijianmo && python -m py_compile app.py\")",
       "Bash(cmd /c \"cd /d D:\\xiangmu\\dizhijianmo && python -m py_compile src/gnn_modeling.py && echo OK\")",
-      "Bash(cmd /c \"cd /d D:\\xiangmu\\dizhijianmo && python -m py_compile src/layer_modeling.py && echo OK\")"
+      "Bash(cmd /c \"cd /d D:\\xiangmu\\dizhijianmo && python -m py_compile src/layer_modeling.py && echo OK\")",
+      "Bash(C:UsersAdministratoranaconda3envsgeomodelpython.exe -m py_compile E:xiangmudizhijianmoapp.py)",
+      "Bash(C:UsersAdministratoranaconda3envsgeomodelpython.exe -m py_compile E:xiangmudizhijianmosrctrainer.py E:xiangmudizhijianmosrclayer_modeling.py E:xiangmudizhijianmosrcgnn_modeling.py E:xiangmudizhijianmosrcdata_loader.py E:xiangmudizhijianmosrcvisualization.py E:xiangmudizhijianmosrcaugmentation.py E:xiangmudizhijianmoconfigsconfig.py)",
+      "Bash(cmd /c \"C:\\Users\\Administrator\\anaconda3\\envs\\geomodel\\python.exe -m py_compile E:\\xiangmu\\dizhijianmo\\src\\trainer.py && echo trainer.py OK\")",
+      "Bash(cmd /c \"C:\\Users\\Administrator\\anaconda3\\envs\\geomodel\\python.exe -m py_compile E:\\xiangmu\\dizhijianmo\\src\\layer_modeling.py && echo layer_modeling.py OK\")",
+      "Bash(cmd /c \"C:\\Users\\Administrator\\anaconda3\\envs\\geomodel\\python.exe -m py_compile E:\\xiangmu\\dizhijianmo\\src\\data_loader.py && echo data_loader.py OK\")",
+      "Bash(cmd /c \"C:\\Users\\Administrator\\anaconda3\\envs\\geomodel\\python.exe -c \"\"from src.data_loader import BoreholeDataProcessor; from src.layer_modeling import LayerDataProcessor, LayerBasedGeologicalModeling; print(''Import OK'')\"\" 2>&1\")",
+      "Bash(\"C:/Users/Administrator/anaconda3/envs/geomodel/python.exe\" -c \"import sys; sys.path.insert(0, ''E:/xiangmu/dizhijianmo''); from src.data_loader import BoreholeDataProcessor; from src.layer_modeling import LayerDataProcessor, LayerBasedGeologicalModeling; print(''Import OK'')\")",
+      "Bash(\"C:/Users/Administrator/anaconda3/envs/geomodel/python.exe\" -c \"import sys; sys.path.insert(0, ''E:/xiangmu/dizhijianmo''); from src.data_loader import BoreholeDataProcessor; print(''Import OK'')\")",
+      "Bash(\"C:/Users/Administrator/anaconda3/envs/geomodel/python.exe\" -m py_compile \"E:\\xiangmu\\dizhijianmo\\src\\data_loader.py\")",
+      "Bash(\"C:/Users/Administrator/anaconda3/envs/geomodel/python.exe\" -m py_compile \"E:\\xiangmu\\dizhijianmo\\src\\layer_modeling.py\")",
+      "Bash(\"C:/Users/Administrator/anaconda3/envs/geomodel/python.exe\" -m py_compile \"E:\\xiangmu\\dizhijianmo\\app.py\")"
     ]
   }
 }

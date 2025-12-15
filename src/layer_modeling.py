@@ -29,17 +29,27 @@ import os
 
 
 class LayerDataProcessor:
-    """层序数据处理器"""
+    """
+    层序数据处理器
+
+    核心设计思路：
+    1. 煤层作为标志层，保持独立（15-4煤、16-1煤等各自独立）
+    2. 非煤岩层填充在煤层之间
+    3. 按钻孔中的实际层序构建地层模型
+    4. 对于稀疏数据的层，使用插值保持连续性
+    """
 
     def __init__(
         self,
         k_neighbors: int = 10,
         normalize_coords: bool = True,
-        normalize_thickness: bool = True
+        normalize_thickness: bool = True,
+        min_layer_occurrence: int = 2  # 层至少出现在多少钻孔中才纳入建模
     ):
         self.k_neighbors = k_neighbors
         self.normalize_coords = normalize_coords
         self.normalize_thickness = normalize_thickness
+        self.min_layer_occurrence = min_layer_occurrence
 
         # 归一化参数
         self.coord_mean = None
@@ -49,32 +59,183 @@ class LayerDataProcessor:
 
         # 层序信息
         self.layer_order = None
+        self.coal_layers = []  # 煤层列表
+        self.non_coal_layers = []  # 非煤层列表
         self.num_layers = 0
+
+        # 层统计信息
+        self.layer_stats = None
+
+    def _extract_coal_number(self, name: str) -> tuple:
+        """
+        从煤层名称中提取编号用于排序
+        如 '15-4煤' -> (15, 4, 0)
+           '16-1上煤' -> (16, 1, 1)
+           '16-1下煤' -> (16, 1, -1)
+        """
+        import re
+
+        # 处理 "上煤"、"下煤"、"中煤" 后缀
+        suffix_order = 0
+        if '上' in name:
+            suffix_order = 1
+        elif '中' in name:
+            suffix_order = 0
+        elif '下' in name:
+            suffix_order = -1
+
+        # 提取数字
+        numbers = re.findall(r'\d+', name)
+        if len(numbers) >= 2:
+            return (int(numbers[0]), int(numbers[1]), suffix_order)
+        elif len(numbers) == 1:
+            return (int(numbers[0]), 0, suffix_order)
+        else:
+            return (999, 0, suffix_order)  # 无法解析的排在后面
+
+    def standardize_lithology(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        标准化岩性名称（层序建模专用）
+
+        煤层保留独立编号，非煤岩性统一命名
+        """
+        df = df.copy()
+
+        def clean_name(name):
+            if pd.isna(name):
+                return '未知'
+            name = str(name).strip()
+
+            # 修复乱码
+            garbled_fixes = {
+                'ú': '煤', 'ϸɰ': '细砂', '��ɰ': '粉砂',
+                'ɰ��': '砂质', '̿��': '炭质', '��ֳ': '腐殖',
+                '����': '泥岩', '������': '砾岩',
+            }
+            for g, f in garbled_fixes.items():
+                if g in name:
+                    name = name.replace(g, f)
+
+            # 煤层保留原始编号
+            if '煤' in name:
+                return name.strip()
+
+            # 非煤岩性标准化
+            if '砂岩' in name or ('砂' in name and '砾' not in name and '泥' not in name):
+                if '粉' in name: return '粉砂岩'
+                elif '细' in name: return '细砂岩'
+                elif '中' in name: return '中砂岩'
+                elif '粗' in name: return '粗砂岩'
+                elif '含砾' in name: return '含砾砂岩'
+                else: return '砂岩'
+            if '砾岩' in name or '砾' in name:
+                if '砂' in name: return '砂砾岩'
+                elif '细' in name: return '细砾岩'
+                elif '中' in name: return '中砾岩'
+                elif '粗' in name: return '粗砾岩'
+                else: return '砾岩'
+            if '泥岩' in name or '泥' in name:
+                if '炭' in name or '碳' in name: return '炭质泥岩'
+                elif '砂' in name: return '砂质泥岩'
+                elif '粉砂' in name: return '粉砂质泥岩'
+                else: return '泥岩'
+            if '腐殖' in name or '表土' in name: return '表土'
+            if '黄土' in name: return '黄土'
+            if '黏土' in name or '粘土' in name: return '黏土'
+
+            return name
+
+        df['lithology'] = df['lithology'].apply(clean_name)
+        return df
 
     def infer_layer_order(self, df: pd.DataFrame) -> List[str]:
         """
         从钻孔数据推断岩层顺序（从深到浅）
 
-        逻辑：按各岩性的平均深度排序
+        改进逻辑：
+        1. 分离煤层和非煤层
+        2. 煤层按编号排序（15-4, 15-5, 16-1, 16-2...）
+        3. 非煤层按平均深度插入
+        4. 最终合并成完整层序
         """
-        # 计算每种岩性的平均高程（z值，负值表示深度）
+        # 检查输入数据有效性
+        if df is None or df.empty:
+            raise ValueError("输入数据为空，无法推断岩层顺序")
+
+        required_cols = ['lithology', 'z', 'borehole_id', 'layer_thickness']
+        missing_cols = [col for col in required_cols if col not in df.columns]
+        if missing_cols:
+            raise ValueError(f"缺少必需列: {missing_cols}")
+
+        # 计算每种岩性的统计信息
         layer_stats = df.groupby('lithology').agg({
-            'z': 'mean',
-            'borehole_id': 'nunique',  # 出现在多少钻孔中
-            'layer_thickness': 'sum'   # 总厚度
+            'z': ['mean', 'min', 'max'],
+            'borehole_id': 'nunique',
+            'layer_thickness': ['sum', 'mean']
         }).reset_index()
 
-        # 按平均高程排序（从小到大 = 从深到浅）
-        layer_stats = layer_stats.sort_values('z')
+        layer_stats.columns = ['lithology', 'z_mean', 'z_min', 'z_max',
+                               'borehole_count', 'total_thickness', 'mean_thickness']
 
-        self.layer_order = layer_stats['lithology'].tolist()
+        self.layer_stats = layer_stats
+
+        if layer_stats.empty:
+            raise ValueError("数据中没有有效的岩性信息")
+
+        # ========== 分离煤层和非煤层 ==========
+        all_layers = layer_stats['lithology'].tolist()
+        self.coal_layers = [l for l in all_layers if '煤' in str(l)]
+        self.non_coal_layers = [l for l in all_layers if '煤' not in str(l)]
+
+        print(f"\n识别到的岩层类型:")
+        print(f"  煤层: {len(self.coal_layers)}种")
+        print(f"  非煤层: {len(self.non_coal_layers)}种")
+
+        # ========== 煤层排序（按编号，从深到浅）==========
+        # 煤层编号越大通常越深（如16-3煤比15-4煤深）
+        self.coal_layers.sort(key=self._extract_coal_number, reverse=True)
+
+        print(f"\n煤层顺序（从深到浅）:")
+        for i, coal in enumerate(self.coal_layers):
+            stats = layer_stats[layer_stats['lithology'] == coal].iloc[0]
+            print(f"  {i+1}. {coal}: 平均高程={stats['z_mean']:.1f}m, "
+                  f"出现在{int(stats['borehole_count'])}个钻孔, "
+                  f"平均厚度={stats['mean_thickness']:.2f}m")
+
+        # ========== 构建完整层序 ==========
+        # 策略：煤层作为骨架，非煤层根据平均深度插入到合适位置
+
+        # 先按深度排序非煤层
+        non_coal_stats = layer_stats[layer_stats['lithology'].isin(self.non_coal_layers)]
+        non_coal_sorted = non_coal_stats.sort_values('z_mean')['lithology'].tolist()
+
+        # 获取煤层的深度信息
+        coal_depths = {}
+        for coal in self.coal_layers:
+            coal_stats = layer_stats[layer_stats['lithology'] == coal].iloc[0]
+            coal_depths[coal] = coal_stats['z_mean']
+
+        # 合并层序：按深度从深到浅
+        all_with_depth = []
+        for layer in self.coal_layers:
+            stats = layer_stats[layer_stats['lithology'] == layer].iloc[0]
+            all_with_depth.append((layer, stats['z_mean'], 'coal'))
+        for layer in self.non_coal_layers:
+            stats = layer_stats[layer_stats['lithology'] == layer].iloc[0]
+            all_with_depth.append((layer, stats['z_mean'], 'non_coal'))
+
+        # 按深度排序（z值从小到大 = 从深到浅）
+        all_with_depth.sort(key=lambda x: x[1])
+
+        self.layer_order = [item[0] for item in all_with_depth]
         self.num_layers = len(self.layer_order)
 
-        print(f"推断的岩层顺序（从深到浅）:")
-        for i, layer in enumerate(self.layer_order):
+        print(f"\n完整层序（从深到浅，共{self.num_layers}层）:")
+        for i, (layer, z, ltype) in enumerate(all_with_depth):
             stats = layer_stats[layer_stats['lithology'] == layer].iloc[0]
-            print(f"  {i+1}. {layer}: 平均高程={stats['z']:.1f}m, "
-                  f"出现在{int(stats['borehole_id'])}个钻孔")
+            type_mark = "[煤]" if ltype == 'coal' else ""
+            print(f"  {i+1}. {layer}{type_mark}: z={z:.1f}m, "
+                  f"钻孔数={int(stats['borehole_count'])}")
 
         return self.layer_order
 
@@ -82,58 +243,164 @@ class LayerDataProcessor:
         """
         提取每个钻孔各层的厚度数据
 
+        改进：
+        1. 对于同一钻孔中同一岩性出现多次的情况，分别记录
+        2. 使用层序号来区分不同层位
+        3. 对缺失层进行标记（而非简单设为0）
+
         返回: DataFrame，每行一个钻孔，列为各层厚度
         """
         if self.layer_order is None:
             self.infer_layer_order(df)
 
         thickness_data = []
+        layer_presence = {layer: 0 for layer in self.layer_order}  # 统计每层出现次数
 
         for bh_id in df['borehole_id'].unique():
-            bh_data = df[df['borehole_id'] == bh_id]
+            bh_data = df[df['borehole_id'] == bh_id].copy()
+
+            # 按深度排序（z从大到小 = 从浅到深）
+            bh_data = bh_data.sort_values('z', ascending=False)
 
             record = {
                 'borehole_id': bh_id,
                 'x': bh_data['x'].iloc[0],
                 'y': bh_data['y'].iloc[0],
-                'total_depth': bh_data['z'].min(),  # 最深点
-                'surface_elevation': bh_data['z'].max()  # 地表高程
+                'total_depth': bh_data['z'].min(),
+                'surface_elevation': bh_data['z'].max()
             }
 
             # 提取各层厚度
             for layer_name in self.layer_order:
                 layer_data = bh_data[bh_data['lithology'] == layer_name]
                 if len(layer_data) > 0:
-                    # 同一岩性可能有多层，求总厚度
+                    # 取该岩性的总厚度
                     thickness = layer_data['layer_thickness'].sum()
+                    layer_presence[layer_name] += 1
                 else:
-                    thickness = 0.0  # 该层缺失
+                    thickness = np.nan  # 用NaN标记缺失，而非0
                 record[f'thickness_{layer_name}'] = thickness
 
             thickness_data.append(record)
 
-        return pd.DataFrame(thickness_data)
+        result_df = pd.DataFrame(thickness_data)
+
+        # 打印层出现统计
+        print(f"\n各层在钻孔中的出现情况:")
+        total_boreholes = len(result_df)
+        for layer in self.layer_order:
+            count = layer_presence[layer]
+            pct = 100 * count / total_boreholes
+            status = "✓" if count >= self.min_layer_occurrence else "⚠稀疏"
+            print(f"  {layer}: {count}/{total_boreholes} ({pct:.1f}%) {status}")
+
+        return result_df
+
+    def fill_missing_thickness(self, thickness_df: pd.DataFrame) -> pd.DataFrame:
+        """
+        填充缺失的厚度数据
+
+        策略：
+        1. 对于煤层：用该层的平均厚度填充（煤层通常是连续的）
+        2. 对于非煤层：用邻近钻孔的IDW插值填充
+        """
+        df = thickness_df.copy()
+        coords = df[['x', 'y']].values
+
+        for layer in self.layer_order:
+            col = f'thickness_{layer}'
+            if col not in df.columns:
+                continue
+
+            # 找出缺失的行
+            missing_mask = df[col].isna()
+            if not missing_mask.any():
+                continue
+
+            # 找出有数据的行
+            valid_mask = ~missing_mask
+            n_valid = valid_mask.sum()
+            n_missing = missing_mask.sum()
+
+            if n_valid == 0:
+                # 全部缺失，使用全局平均或设为0
+                print(f"  警告: {layer} 在所有钻孔中都缺失，设为0")
+                df.loc[missing_mask, col] = 0
+                continue
+
+            # 使用IDW插值填充
+            valid_coords = coords[valid_mask]
+            valid_values = df.loc[valid_mask, col].values
+            missing_coords = coords[missing_mask]
+
+            # KNN + IDW
+            tree = KDTree(valid_coords)
+            k = min(3, n_valid)  # 使用最近的3个点
+            distances, indices = tree.query(missing_coords, k=k)
+
+            if k == 1:
+                distances = distances.reshape(-1, 1)
+                indices = indices.reshape(-1, 1)
+
+            # IDW权重
+            weights = 1.0 / (distances + 1e-8)
+            weights = weights / weights.sum(axis=1, keepdims=True)
+
+            # 插值
+            interpolated = np.sum(weights * valid_values[indices], axis=1)
+
+            # 煤层使用更保守的策略：如果插值结果太小，用平均值
+            if '煤' in layer:
+                mean_thickness = valid_values.mean()
+                # 如果插值结果小于平均值的30%，用平均值
+                interpolated = np.where(interpolated < mean_thickness * 0.3,
+                                        mean_thickness, interpolated)
+
+            df.loc[missing_mask, col] = interpolated
+            print(f"  填充 {layer}: {n_missing}个缺失值 (使用{n_valid}个有效点插值)")
+
+        return df
 
     def build_graph_data(
         self,
         thickness_df: pd.DataFrame,
         test_size: float = 0.2,
-        val_size: float = 0.1
+        val_size: float = 0.1,
+        random_seed: int = 42,
+        fill_missing: bool = True
     ) -> Tuple[Data, Dict]:
         """
         构建用于GNN训练的图数据
 
         特征: 坐标 + 其他地质特征
         标签: 各层厚度
+
+        Args:
+            thickness_df: 厚度数据DataFrame
+            test_size: 测试集比例
+            val_size: 验证集比例
+            random_seed: 随机种子，确保结果可复现
+            fill_missing: 是否填充缺失的厚度数据
         """
         n_samples = len(thickness_df)
+
+        if n_samples == 0:
+            raise ValueError("厚度数据为空")
+
+        # 填充缺失值
+        if fill_missing:
+            print("\n填充缺失的厚度数据...")
+            thickness_df = self.fill_missing_thickness(thickness_df)
+
+        # 设置随机种子确保可复现
+        np.random.seed(random_seed)
 
         # 1. 提取坐标
         coords = thickness_df[['x', 'y']].values.astype(np.float32)
 
         # 2. 提取厚度标签
         thickness_cols = [f'thickness_{layer}' for layer in self.layer_order]
-        thicknesses = thickness_df[thickness_cols].values.astype(np.float32)
+        thicknesses = thickness_df[thickness_cols].fillna(0).values.astype(np.float32)
 
         # 3. 归一化
         if self.normalize_coords:
@@ -323,7 +590,7 @@ class ThicknessTrainer:
             weight_decay=weight_decay
         )
         self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer, mode='min', factor=0.5, patience=20, verbose=True
+            self.optimizer, mode='min', factor=0.5, patience=20
         )
 
         self.best_val_loss = float('inf')
@@ -575,29 +842,65 @@ class LayerBasedGeologicalModeling:
     def _interpolate_thickness(
         self,
         thickness_df: pd.DataFrame,
-        layer_name: str
+        layer_name: str,
+        min_thickness: float = None
     ) -> np.ndarray:
-        """使用传统插值预测某层厚度"""
+        """
+        使用传统插值预测某层厚度
+
+        改进：
+        1. 对于煤层，使用更保守的插值策略，确保连续性
+        2. 对于缺失数据多的层，使用更平滑的插值
+        """
         col_name = f'thickness_{layer_name}'
 
-        points = thickness_df[['x', 'y']].values
-        values = thickness_df[col_name].values
+        # 获取有效数据点（非NaN且非0）
+        valid_mask = thickness_df[col_name].notna() & (thickness_df[col_name] > 0)
+        n_valid = valid_mask.sum()
 
-        # RBF插值
-        if self.interpolation_method == 'rbf':
-            interpolator = RBFInterpolator(
-                points, values,
-                kernel='thin_plate_spline',
-                smoothing=0.1
-            )
+        if n_valid == 0:
+            # 该层没有有效数据，返回零厚度
+            nx, ny, _ = self.resolution
+            return np.zeros((nx, ny))
+
+        points = thickness_df.loc[valid_mask, ['x', 'y']].values
+        values = thickness_df.loc[valid_mask, col_name].values
+
+        # 计算平均厚度用于煤层的最小保障
+        mean_thickness = values.mean()
+
+        # 根据数据点数量选择插值方法
+        if n_valid < 3:
+            # 数据太少，使用最近邻或常数填充
+            nx, ny, _ = self.resolution
+            thickness = np.full((nx, ny), mean_thickness)
+            print(f"    {layer_name}: 数据点仅{n_valid}个，使用平均厚度{mean_thickness:.2f}m填充")
         else:
-            interpolator = LinearNDInterpolator(points, values, fill_value=0)
+            # RBF插值
+            if self.interpolation_method == 'rbf':
+                # 根据数据点密度调整平滑参数
+                smoothing = 0.1 if n_valid > 10 else 0.5
+                interpolator = RBFInterpolator(
+                    points, values,
+                    kernel='thin_plate_spline',
+                    smoothing=smoothing
+                )
+            else:
+                interpolator = LinearNDInterpolator(points, values, fill_value=mean_thickness)
 
-        nx, ny, _ = self.resolution
-        thickness = interpolator(self.grid_xy).reshape(nx, ny)
+            nx, ny, _ = self.resolution
+            thickness = interpolator(self.grid_xy).reshape(nx, ny)
 
         # 确保非负
         thickness = np.maximum(thickness, 0)
+
+        # 煤层特殊处理：确保最小厚度
+        if '煤' in layer_name and min_thickness is None:
+            min_thickness = mean_thickness * 0.3  # 煤层至少保持平均厚度的30%
+
+        if min_thickness is not None and min_thickness > 0:
+            # 在有数据支持的区域，确保最小厚度
+            thickness = np.maximum(thickness, min_thickness)
 
         if self.smooth_surfaces:
             thickness = gaussian_filter(thickness, sigma=self.smooth_sigma)
@@ -796,29 +1099,38 @@ class LayerBasedGeologicalModeling:
 
             current_surface = top_surface
 
-        # 5. 体素化
+        # 5. 体素化 - 使用向量化优化
         if verbose:
             print("\n体素化填充...")
 
         self.lithology_3d = np.zeros((nx, ny, nz), dtype=np.int32)
+
+        # 预计算z网格的索引映射
+        z_min_grid, z_max_grid = z_grid[0], z_grid[-1]
 
         for layer_idx, layer_name in enumerate(processor.layer_order):
             surface_info = self.surfaces[layer_name]
             bottom = surface_info['bottom']
             top = surface_info['top']
 
+            # 向量化：计算所有网格点的k索引
+            # 将底面和顶面的z值映射到z_grid索引
+            k_start_all = np.searchsorted(z_grid, bottom.ravel())
+            k_end_all = np.searchsorted(z_grid, top.ravel())
+
+            # 边界裁剪
+            k_start_all = np.clip(k_start_all, 0, nz)
+            k_end_all = np.clip(k_end_all, 0, nz)
+
+            # 重塑回2D
+            k_start_2d = k_start_all.reshape(nx, ny)
+            k_end_2d = k_end_all.reshape(nx, ny)
+
+            # 填充体素 - 使用循环但每次填充一整列
             for i in range(nx):
                 for j in range(ny):
-                    z_bottom = bottom[i, j]
-                    z_top = top[i, j]
-
-                    # 找到对应的z索引
-                    k_start = np.searchsorted(z_grid, z_bottom)
-                    k_end = np.searchsorted(z_grid, z_top)
-
-                    k_start = max(0, min(k_start, nz))
-                    k_end = max(0, min(k_end, nz))
-
+                    k_start = k_start_2d[i, j]
+                    k_end = k_end_2d[i, j]
                     if k_end > k_start:
                         self.lithology_3d[i, j, k_start:k_end] = layer_idx
 
@@ -1022,6 +1334,12 @@ def build_layer_based_model(
         print("=" * 60)
 
     processor = LayerDataProcessor(k_neighbors=10)
+
+    # 先标准化岩性名称
+    df = processor.standardize_lithology(df)
+    if verbose:
+        print(f"\n标准化后岩性类别: {df['lithology'].nunique()}种")
+
     processor.infer_layer_order(df)
     thickness_df = processor.extract_thickness_data(df)
 

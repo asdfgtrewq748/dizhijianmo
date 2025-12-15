@@ -152,14 +152,22 @@ class BaseGNNModeling(ABC):
         lithology_names = lithology_names or self.lithology_classes
         nx, ny, nz = self.resolution
 
-        # 计算单元格体积
+        # 计算单元格体积 - 防止除零
+        x_divisor = max(nx - 1, 1)
+        y_divisor = max(ny - 1, 1)
+        z_divisor = max(nz - 1, 1)
+
         cell_volume = (
-            (self.bounds['x'][1] - self.bounds['x'][0]) / (nx - 1) *
-            (self.bounds['y'][1] - self.bounds['y'][0]) / (ny - 1) *
-            (self.bounds['z'][1] - self.bounds['z'][0]) / (nz - 1)
+            (self.bounds['x'][1] - self.bounds['x'][0]) / x_divisor *
+            (self.bounds['y'][1] - self.bounds['y'][0]) / y_divisor *
+            (self.bounds['z'][1] - self.bounds['z'][0]) / z_divisor
         )
 
         stats = []
+        total_count = len(self.grid_lithology)
+        if total_count == 0:
+            return pd.DataFrame(stats)
+
         for i in range(int(self.grid_lithology.max()) + 1):
             mask = self.grid_lithology == i
             count = mask.sum()
@@ -171,7 +179,7 @@ class BaseGNNModeling(ABC):
                 '岩性': name,
                 '体素数': count,
                 '体积 (m³)': volume,
-                '占比 (%)': 100.0 * count / len(self.grid_lithology),
+                '占比 (%)': 100.0 * count / total_count,
                 '平均置信度': self.grid_confidence[mask].mean() if count > 0 else 0
             })
 
@@ -358,16 +366,33 @@ class DirectPredictionModeling(BaseGNNModeling):
         n_grid = len(grid_coords)
         n_features = borehole_features.shape[1]
 
+        # 输入校验
+        if n_grid == 0:
+            raise ValueError("网格坐标为空")
+        if len(borehole_coords) == 0:
+            raise ValueError("钻孔坐标为空")
+
         # 1. 归一化坐标
         if coord_scaler is not None and hasattr(coord_scaler, 'mean_'):
             coords_normalized = coord_scaler.transform(grid_coords)
         else:
-            # 手动归一化
-            coords_normalized = (grid_coords - grid_coords.mean(axis=0)) / (grid_coords.std(axis=0) + 1e-8)
+            # 手动归一化 - 使用钻孔坐标的统计量以保持一致性
+            coord_mean = borehole_coords.mean(axis=0)
+            coord_std = borehole_coords.std(axis=0) + 1e-8
+            coords_normalized = (grid_coords - coord_mean) / coord_std
 
         # 2. 使用KNN插值钻孔特征到网格点
+        k = min(self.k_neighbors, len(borehole_coords))
+        if k == 0:
+            raise ValueError("没有足够的钻孔节点进行KNN插值")
+
         tree = KDTree(borehole_coords)
-        distances, indices = tree.query(grid_coords, k=min(self.k_neighbors, len(borehole_coords)))
+        distances, indices = tree.query(grid_coords, k=k)
+
+        # 确保 distances 是2D的 (当k=1时可能是1D)
+        if distances.ndim == 1:
+            distances = distances.reshape(-1, 1)
+            indices = indices.reshape(-1, 1)
 
         # IDW插值权重
         weights = 1.0 / (distances + 1e-8)
@@ -381,11 +406,11 @@ class DirectPredictionModeling(BaseGNNModeling):
                 interpolated_features[i] = np.sum(
                     weights[i, :, np.newaxis] * other_features[indices[i]], axis=0
                 )
+            # 3. 合并特征
+            grid_features = np.concatenate([coords_normalized, interpolated_features], axis=1)
         else:
-            interpolated_features = np.zeros((n_grid, 1))
-
-        # 3. 合并特征
-        grid_features = np.concatenate([coords_normalized, interpolated_features], axis=1)
+            # 特征维度<=3时，只使用坐标作为特征
+            grid_features = coords_normalized
 
         return grid_features.astype(np.float32)
 

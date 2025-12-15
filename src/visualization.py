@@ -173,6 +173,50 @@ class SCIFigureStyle:
         return fig, axes
 
     @classmethod
+    def save_figure(cls, fig: plt.Figure, filepath: str,
+                    formats: List[str] = None, dpi: int = None,
+                    close_after: bool = True):
+        """
+        保存图形到文件并可选关闭figure释放内存
+
+        Args:
+            fig: matplotlib Figure对象
+            filepath: 保存路径（不含扩展名或含扩展名）
+            formats: 导出格式列表，默认使用配置中的格式
+            dpi: DPI分辨率，默认使用配置中的值
+            close_after: 是否在保存后关闭figure释放内存
+        """
+        if formats is None:
+            formats = ['png']  # 默认只保存png
+        if dpi is None:
+            dpi = cls.EXPORT_CONFIG['dpi']
+
+        # 确保目录存在
+        dirpath = os.path.dirname(filepath)
+        if dirpath:
+            os.makedirs(dirpath, exist_ok=True)
+
+        # 去掉扩展名（如果有的话）
+        base_path = os.path.splitext(filepath)[0]
+
+        for fmt in formats:
+            save_path = f"{base_path}.{fmt}"
+            fig.savefig(save_path, format=fmt, dpi=dpi,
+                       bbox_inches=cls.EXPORT_CONFIG['bbox_inches'],
+                       pad_inches=cls.EXPORT_CONFIG['pad_inches'],
+                       facecolor=fig.get_facecolor(),
+                       edgecolor='none')
+            print(f"图形已保存: {save_path}")
+
+        if close_after:
+            plt.close(fig)
+
+    @classmethod
+    def close_all_figures(cls):
+        """关闭所有matplotlib图形，释放内存"""
+        plt.close('all')
+
+    @classmethod
     def style_axis(cls, ax: plt.Axes,
                    xlabel: str = '', ylabel: str = '',
                    title: str = '', grid: bool = True):
