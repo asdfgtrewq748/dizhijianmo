@@ -21,6 +21,22 @@ from src.models import get_model
 from src.data_loader import BoreholeDataProcessor, GridInterpolator
 from src.trainer import GeoModelTrainer, compute_class_weights
 from src.modeling import StratigraphicModel3D, build_stratigraphic_model_from_df
+from src.gnn_modeling import DirectPredictionModeling, build_gnn_geological_model
+
+# 导入层序累加建模模块
+LAYER_MODELING_ERROR = None
+try:
+    from src.layer_modeling import (
+        LayerDataProcessor, GNNThicknessPredictor, ThicknessTrainer,
+        LayerBasedGeologicalModeling, build_layer_based_model
+    )
+    LAYER_MODELING_AVAILABLE = True
+except ImportError as e:
+    LAYER_MODELING_AVAILABLE = False
+    LAYER_MODELING_ERROR = f"ImportError: {e}"
+except Exception as e:
+    LAYER_MODELING_AVAILABLE = False
+    LAYER_MODELING_ERROR = f"{type(e).__name__}: {e}"
 
 # 导入SCI可视化模块
 SCI_VIS_ERROR = None
@@ -658,6 +674,81 @@ def plot_cross_section(
     return fig
 
 
+def create_slice_figure(
+    slice_data: np.ndarray,
+    slice_coords: dict,
+    axis: str,
+    position: float,
+    lithology_classes: list,
+    title: str = ""
+) -> go.Figure:
+    """创建切片可视化图 - 用于地质建模Tab"""
+    fig = go.Figure()
+
+    colors = get_color_palette(len(lithology_classes))
+
+    # 获取坐标网格
+    if axis == 'z':
+        x_coords = slice_coords['x']
+        y_coords = slice_coords['y']
+        x_label = "<b>X (m)</b>"
+        y_label = "<b>Y (m)</b>"
+    elif axis == 'x':
+        x_coords = slice_coords['y']
+        y_coords = slice_coords['z']
+        x_label = "<b>Y (m)</b>"
+        y_label = "<b>Z (m)</b>"
+    else:  # axis == 'y'
+        x_coords = slice_coords['x']
+        y_coords = slice_coords['z']
+        x_label = "<b>X (m)</b>"
+        y_label = "<b>Z (m)</b>"
+
+    # 绘制每种岩性
+    for i, class_name in enumerate(lithology_classes):
+        mask = slice_data == i
+        if mask.any():
+            fig.add_trace(go.Scatter(
+                x=x_coords[mask],
+                y=y_coords[mask],
+                mode='markers',
+                name=class_name,
+                marker=dict(
+                    size=6,
+                    color=colors[i],
+                    opacity=0.85,
+                    line=dict(width=0.3, color='#333333')
+                ),
+                hovertemplate=f'{class_name}<br>X: %{{x:.1f}}<br>Y: %{{y:.1f}}<extra></extra>'
+            ))
+
+    axis_name = {'x': 'X', 'y': 'Y', 'z': 'Z'}[axis]
+    fig.update_layout(
+        title=dict(
+            text=f"<b>{title} - {axis_name}={position:.1f}m 切片</b>",
+            font=dict(size=12, family="Arial", color='#333333'),
+            x=0.5,
+            xanchor='center'
+        ),
+        xaxis_title=x_label,
+        yaxis_title=y_label,
+        legend=dict(
+            **SCI_LEGEND,
+            title=dict(text="<b>岩性</b>", font=dict(size=10)),
+            yanchor="top",
+            y=0.98,
+            xanchor="right",
+            x=0.98
+        ),
+        height=500,
+        **SCI_LAYOUT
+    )
+    fig.update_xaxes(**SCI_AXIS)
+    fig.update_yaxes(**SCI_AXIS)
+
+    return fig
+
+
 def plot_training_history(history: dict, smooth_window: int = 20) -> go.Figure:
     """绘制训练历史曲线 - SCI论文质量（增强版）
 
@@ -1036,6 +1127,19 @@ def main():
         st.session_state.eval_results = None
     if 'probs' not in st.session_state:
         st.session_state.probs = None
+    if 'gnn_model' not in st.session_state:
+        st.session_state.gnn_model = None
+    if 'gnn_model_stats' not in st.session_state:
+        st.session_state.gnn_model_stats = None
+    # 层序累加建模相关状态
+    if 'layer_model' not in st.session_state:
+        st.session_state.layer_model = None
+    if 'layer_processor' not in st.session_state:
+        st.session_state.layer_processor = None
+    if 'thickness_trainer' not in st.session_state:
+        st.session_state.thickness_trainer = None
+    if 'layer_model_stats' not in st.session_state:
+        st.session_state.layer_model_stats = None
 
     # Tab 1: 数据探索
     with tab1:
@@ -1454,15 +1558,12 @@ def main():
     with tab5:
         st.header("三维地质体建模")
 
-        if st.session_state.predictions is None:
-            st.warning("⚠️ 请先在'结果分析'标签页进行模型评估")
+        if st.session_state.df is None:
+            st.warning("⚠️ 请先在'数据探索'标签页加载数据")
             st.stop()
 
-        data = st.session_state.data
+        df = st.session_state.df
         result = st.session_state.result
-        trainer = st.session_state.trainer
-        predictions = st.session_state.predictions
-        probs = st.session_state.probs
 
         # 建模参数
         col1, col2 = st.columns([1, 2])
@@ -1473,164 +1574,236 @@ def main():
             ny = st.slider("Y方向网格数", 20, 100, 50)
             nz = st.slider("Z方向网格数", 20, 100, 40)
 
-            interp_method = st.selectbox("插值方法", ['rbf', 'idw', 'linear'],
-                                          help="RBF(径向基函数)插值效果最好")
+            st.subheader("建模方法")
+            modeling_method = st.radio(
+                "选择建模方法",
+                ["层序累加法 (推荐)", "传统插值", "GNN直接预测"],
+                index=0,
+                help="""
+                **层序累加法**: 逐层累加厚度构建曲面，GNN预测厚度，无冲突无空缺
+                **传统插值**: 基于层面RBF/IDW插值
+                **GNN直接预测**: 使用GNN模型预测每个体素的岩性
+                """
+            )
+
+            # 层序累加法参数
+            if modeling_method == "层序累加法 (推荐)":
+                if not LAYER_MODELING_AVAILABLE:
+                    st.error(f"层序累加建模模块未加载: {LAYER_MODELING_ERROR}")
+                else:
+                    st.subheader("层序累加参数")
+                    use_gnn_thickness = st.checkbox("使用GNN预测厚度", value=True,
+                                                    help="使用GNN预测各层厚度，否则使用传统插值")
+                    if use_gnn_thickness:
+                        thickness_epochs = st.slider("厚度预测训练轮数", 100, 500, 200)
+                        thickness_hidden = st.selectbox("隐藏层维度", [64, 128, 256], index=1)
+                    layer_smooth = st.checkbox("平滑曲面", value=True)
+                    if layer_smooth:
+                        layer_smooth_sigma = st.slider("平滑系数", 0.5, 3.0, 1.0)
+                    else:
+                        layer_smooth_sigma = 1.0
+
+            # 传统插值参数
+            elif modeling_method == "传统插值":
+                interp_method = st.selectbox("插值方法", ['rbf', 'idw', 'linear', 'kriging'])
+
+            # GNN直接预测参数
+            elif modeling_method == "GNN直接预测":
+                if st.session_state.trainer is None:
+                    st.warning("⚠️ GNN直接预测需要先训练分类模型")
+                st.subheader("GNN参数")
+                gnn_k_neighbors = st.slider("K邻居数", 4, 16, 8)
+                gnn_smooth = st.checkbox("平滑输出", value=True)
+                if gnn_smooth:
+                    gnn_smooth_sigma = st.slider("平滑系数", 0.1, 2.0, 0.5)
+                else:
+                    gnn_smooth_sigma = 0.5
 
         with col2:
-            if st.button("🏗️ 构建三维地质模型", type="primary"):
-                with st.spinner("正在构建层状三维地质模型..."):
-                    # 创建层状地质模型
-                    geo_model = StratigraphicModel3D(
-                        resolution=(nx, ny, nz),
-                        interpolation_method=interp_method,
-                        smoothing=0.1
-                    )
+            # ========== 层序累加法 ==========
+            if modeling_method == "层序累加法 (推荐)" and LAYER_MODELING_AVAILABLE:
+                st.markdown("""
+                ### 层序累加建模原理
+                1. **确定底面** - 以最深钻孔点为基准
+                2. **逐层累加** - 从最深层开始，累加厚度构建曲面
+                3. **GNN预测厚度** - 使用回归模型预测各层厚度分布
+                4. **无冲突保证** - 数学上保证无岩体重叠和空缺
+                """)
 
-                    # 使用原始钻孔数据构建层状模型
-                    geo_model.build_stratigraphic_model(st.session_state.df, result['lithology_classes'])
+                if st.button("🏗️ 构建层序累加模型", type="primary"):
+                    with st.spinner("正在构建层序累加地质模型..."):
+                        try:
+                            progress = st.progress(0)
+                            status = st.empty()
 
-                    st.session_state.geo_model = geo_model
+                            # 1. 数据处理
+                            status.text("处理层序数据...")
+                            layer_processor = LayerDataProcessor(k_neighbors=10)
+                            layer_processor.infer_layer_order(df)
+                            thickness_df = layer_processor.extract_thickness_data(df)
+                            progress.progress(20)
 
-                    # 获取统计
-                    stats = geo_model.get_statistics(result['lithology_classes'])
-                    st.session_state.model_stats = stats
+                            thickness_trainer = None
 
-                    st.success(f"✅ 层状地质模型构建完成! 共 {nx*ny*nz:,} 个体素")
+                            # 2. 训练GNN厚度预测模型（如果启用）
+                            if use_gnn_thickness:
+                                status.text("训练厚度预测模型...")
+                                data_thickness, result_thickness = layer_processor.build_graph_data(thickness_df)
 
-        # 显示模型信息和统计
-        if 'geo_model' in st.session_state:
-            geo_model = st.session_state.geo_model
-            stats = st.session_state.model_stats
+                                # 创建模型
+                                model = GNNThicknessPredictor(
+                                    in_channels=result_thickness['num_features'],
+                                    hidden_channels=thickness_hidden,
+                                    num_layers=4,
+                                    num_output_layers=result_thickness['num_layers'],
+                                    dropout=0.3
+                                )
 
-            st.subheader("岩性体积统计")
-            st.dataframe(stats, width="stretch")
+                                thickness_trainer = ThicknessTrainer(model, learning_rate=0.001)
+                                thickness_trainer.train(
+                                    data_thickness,
+                                    epochs=thickness_epochs,
+                                    patience=50,
+                                    verbose=False
+                                )
+                                progress.progress(60)
 
-            # 可视化切片
+                            # 3. 构建地质模型
+                            status.text("构建三维地质模型...")
+                            layer_model = LayerBasedGeologicalModeling(
+                                resolution=(nx, ny, nz),
+                                use_gnn=use_gnn_thickness,
+                                smooth_surfaces=layer_smooth,
+                                smooth_sigma=layer_smooth_sigma
+                            )
+
+                            layer_model.build_model(
+                                df,
+                                layer_processor,
+                                trainer=thickness_trainer,
+                                thickness_df=thickness_df,
+                                verbose=False
+                            )
+                            progress.progress(90)
+
+                            # 4. 保存结果
+                            st.session_state.layer_model = layer_model
+                            st.session_state.layer_processor = layer_processor
+                            st.session_state.thickness_trainer = thickness_trainer
+                            st.session_state.layer_model_stats = layer_model.get_statistics(layer_processor.layer_order)
+                            progress.progress(100)
+
+                            status.text("完成!")
+                            st.success(f"✅ 层序累加模型构建完成! 共 {nx*ny*nz:,} 个体素")
+
+                        except Exception as e:
+                            st.error(f"建模失败: {str(e)}")
+                            import traceback
+                            st.code(traceback.format_exc())
+
+            # ========== 传统插值 ==========
+            elif modeling_method == "传统插值":
+                if st.button("🏗️ 构建传统地质模型", type="primary"):
+                    with st.spinner("正在构建层状三维地质模型..."):
+                        geo_model = StratigraphicModel3D(
+                            resolution=(nx, ny, nz),
+                            interpolation_method=interp_method,
+                            smoothing=0.1
+                        )
+                        geo_model.build_stratigraphic_model(df, result['lithology_classes'])
+                        st.session_state.geo_model = geo_model
+                        stats = geo_model.get_statistics(result['lithology_classes'])
+                        st.session_state.model_stats = stats
+                        st.success(f"✅ 传统地质模型构建完成! 共 {nx*ny*nz:,} 个体素")
+
+            # ========== GNN直接预测 ==========
+            elif modeling_method == "GNN直接预测":
+                if st.session_state.trainer is None:
+                    st.info("请先在'模型训练'标签页训练分类模型")
+                else:
+                    if st.button("🧠 构建GNN预测模型", type="primary"):
+                        with st.spinner("正在使用GNN预测三维地质模型..."):
+                            trainer = st.session_state.trainer
+                            data = st.session_state.data
+                            gnn_model = DirectPredictionModeling(
+                                resolution=(nx, ny, nz),
+                                k_neighbors=gnn_k_neighbors,
+                                smooth_output=gnn_smooth,
+                                smooth_sigma=gnn_smooth_sigma
+                            )
+                            gnn_model.build_model(trainer, data, result)
+                            st.session_state.gnn_model = gnn_model
+                            stats = gnn_model.get_statistics(result['lithology_classes'])
+                            st.session_state.gnn_model_stats = stats
+                            st.success(f"✅ GNN预测模型构建完成! 共 {nx*ny*nz:,} 个体素")
+                            st.info(f"平均预测置信度: {gnn_model.grid_confidence.mean():.4f}")
+
+        # ==================== 显示模型结果 ====================
+        has_layer = st.session_state.layer_model is not None
+        has_traditional = 'geo_model' in st.session_state and st.session_state.geo_model is not None
+        has_gnn = 'gnn_model' in st.session_state and st.session_state.gnn_model is not None
+
+        if has_layer or has_traditional or has_gnn:
+            st.divider()
+            st.subheader("📊 模型结果")
+
+            # 选择显示哪个模型
+            available_models = []
+            if has_layer:
+                available_models.append("层序累加模型")
+            if has_traditional:
+                available_models.append("传统插值模型")
+            if has_gnn:
+                available_models.append("GNN预测模型")
+
+            if len(available_models) > 1:
+                model_to_show = st.radio("选择查看的模型", available_models, horizontal=True)
+            else:
+                model_to_show = available_models[0]
+
+            # 获取当前模型
+            if model_to_show == "层序累加模型":
+                current_model = st.session_state.layer_model
+                current_stats = st.session_state.layer_model_stats
+                lithology_names = st.session_state.layer_processor.layer_order
+            elif model_to_show == "传统插值模型":
+                current_model = st.session_state.geo_model
+                current_stats = st.session_state.model_stats
+                lithology_names = result['lithology_classes']
+            else:
+                current_model = st.session_state.gnn_model
+                current_stats = st.session_state.gnn_model_stats
+                lithology_names = result['lithology_classes']
+
+            # 统计信息
+            st.markdown(f"**{model_to_show}统计**")
+            st.dataframe(current_stats, use_container_width=True)
+
+            # 切片可视化
             st.subheader("模型切片可视化")
 
             slice_col1, slice_col2 = st.columns([1, 3])
 
             with slice_col1:
-                slice_axis = st.selectbox("切片方向", ['z', 'x', 'y'], key='slice_axis')
-                grid_info = geo_model.grid_info
+                slice_axis = st.selectbox("切片方向", ['z', 'x', 'y'], key='slice_axis_new')
+                grid_info = current_model.grid_info
 
                 if slice_axis == 'z':
                     z_range = grid_info['z_grid']
-                    slice_pos = st.slider("切片位置 (深度)", float(z_range.min()), float(z_range.max()), float(z_range.mean()))
+                    slice_pos = st.slider("切片位置 (深度)", float(z_range.min()), float(z_range.max()), float(z_range.mean()), key='slice_pos_new')
                 elif slice_axis == 'x':
                     x_range = grid_info['x_grid']
-                    slice_pos = st.slider("切片位置 (X)", float(x_range.min()), float(x_range.max()), float(x_range.mean()))
+                    slice_pos = st.slider("切片位置 (X)", float(x_range.min()), float(x_range.max()), float(x_range.mean()), key='slice_pos_new')
                 else:
                     y_range = grid_info['y_grid']
-                    slice_pos = st.slider("切片位置 (Y)", float(y_range.min()), float(y_range.max()), float(y_range.mean()))
+                    slice_pos = st.slider("切片位置 (Y)", float(y_range.min()), float(y_range.max()), float(y_range.mean()), key='slice_pos_new')
 
             with slice_col2:
-                # 获取切片
-                slice_data, slice_coords, slice_info = geo_model.get_slice(slice_axis, position=slice_pos)
+                slice_data, slice_coords, slice_info = current_model.get_slice(slice_axis, position=slice_pos)
+                fig_slice = create_slice_figure(slice_data, slice_coords, slice_axis, slice_pos, lithology_names, model_to_show)
+                st.plotly_chart(fig_slice, use_container_width=True)
 
-                # 绘制切片 - SCI论文质量
-                fig_slice = go.Figure()
-
-                colors = get_color_palette(len(result['lithology_classes']))
-
-                if slice_axis == 'z':
-                    for i, class_name in enumerate(result['lithology_classes']):
-                        mask = slice_data == i
-                        if mask.any():
-                            fig_slice.add_trace(go.Scatter(
-                                x=slice_coords['x'][mask].flatten(),
-                                y=slice_coords['y'][mask].flatten(),
-                                mode='markers',
-                                name=class_name,
-                                marker=dict(
-                                    size=6,
-                                    color=colors[i],
-                                    opacity=0.85,
-                                    line=dict(width=0.3, color='#333333')
-                                )
-                            ))
-                    fig_slice.update_layout(
-                        title=dict(
-                            text=f"<b>Horizontal Slice (Z = {slice_pos:.1f} m)</b>",
-                            font=dict(size=14, family="Arial", color='#333333'),
-                            x=0.5,
-                            xanchor='center'
-                        ),
-                        xaxis_title="<b>X (m)</b>",
-                        yaxis_title="<b>Y (m)</b>"
-                    )
-                elif slice_axis == 'x':
-                    for i, class_name in enumerate(result['lithology_classes']):
-                        mask = slice_data == i
-                        if mask.any():
-                            fig_slice.add_trace(go.Scatter(
-                                x=slice_coords['y'][mask].flatten(),
-                                y=slice_coords['z'][mask].flatten(),
-                                mode='markers',
-                                name=class_name,
-                                marker=dict(
-                                    size=6,
-                                    color=colors[i],
-                                    opacity=0.85,
-                                    line=dict(width=0.3, color='#333333')
-                                )
-                            ))
-                    fig_slice.update_layout(
-                        title=dict(
-                            text=f"<b>X Cross Section (X = {slice_pos:.1f} m)</b>",
-                            font=dict(size=14, family="Arial", color='#333333'),
-                            x=0.5,
-                            xanchor='center'
-                        ),
-                        xaxis_title="<b>Y (m)</b>",
-                        yaxis_title="<b>Z (m)</b>"
-                    )
-                else:
-                    for i, class_name in enumerate(result['lithology_classes']):
-                        mask = slice_data == i
-                        if mask.any():
-                            fig_slice.add_trace(go.Scatter(
-                                x=slice_coords['x'][mask].flatten(),
-                                y=slice_coords['z'][mask].flatten(),
-                                mode='markers',
-                                name=class_name,
-                                marker=dict(
-                                    size=6,
-                                    color=colors[i],
-                                    opacity=0.85,
-                                    line=dict(width=0.3, color='#333333')
-                                )
-                            ))
-                    fig_slice.update_layout(
-                        title=dict(
-                            text=f"<b>Y Cross Section (Y = {slice_pos:.1f} m)</b>",
-                            font=dict(size=14, family="Arial", color='#333333'),
-                            x=0.5,
-                            xanchor='center'
-                        ),
-                        xaxis_title="<b>X (m)</b>",
-                        yaxis_title="<b>Z (m)</b>"
-                    )
-
-                # 应用SCI样式
-                fig_slice.update_layout(
-                    legend=dict(
-                        **SCI_LEGEND,
-                        title=dict(text="<b>Lithology</b>", font=dict(size=11)),
-                        yanchor="top",
-                        y=0.98,
-                        xanchor="right",
-                        x=0.98
-                    ),
-                    height=500,
-                    **SCI_LAYOUT
-                )
-                fig_slice.update_xaxes(**SCI_AXIS)
-                fig_slice.update_yaxes(**SCI_AXIS)
-
-                st.plotly_chart(fig_slice, width="stretch")
-
-            # ==================== 三维地质体模型可视化 ====================
+            # 三维可视化部分
             st.subheader("三维地质体模型")
 
             vis_col1, vis_col2 = st.columns([1, 3])
@@ -1643,25 +1816,28 @@ def main():
                 if not show_all_layers:
                     selected_lithologies = st.multiselect(
                         "选择显示的岩性",
-                        result['lithology_classes'],
-                        default=result['lithology_classes'][:3] if len(result['lithology_classes']) > 3 else result['lithology_classes']
+                        lithology_names,
+                        default=lithology_names[:3] if len(lithology_names) > 3 else lithology_names
                     )
                 else:
-                    selected_lithologies = result['lithology_classes']
+                    selected_lithologies = lithology_names
 
                 surface_count = st.slider("曲面精细度", 1, 3, 2, help="值越大曲面越精细，但渲染越慢")
+
+                # 使用上方选择的模型
+                display_model = current_model
 
             with vis_col2:
                 # 创建三维等值面可视化
                 fig_3d_model = go.Figure()
 
-                lithology_3d, confidence_3d = geo_model.get_voxel_model()
-                colors = get_color_palette(len(result['lithology_classes']))
+                lithology_3d, confidence_3d = display_model.get_voxel_model()
+                colors = get_color_palette(len(lithology_names))
 
                 # 获取网格信息
-                x_grid = geo_model.grid_info['x_grid']
-                y_grid = geo_model.grid_info['y_grid']
-                z_grid = geo_model.grid_info['z_grid']
+                x_grid = display_model.grid_info['x_grid']
+                y_grid = display_model.grid_info['y_grid']
+                z_grid = display_model.grid_info['z_grid']
 
                 # 颜色转换函数
                 def color_to_rgb(color_str):
@@ -1675,29 +1851,24 @@ def main():
                             return tuple(int(x) for x in match.groups())
                     return (128, 128, 128)
 
-                # 使用 Isosurface 为每种岩性创建连续曲面
-                # 先构建正确的坐标网格
-                nx, ny, nz = len(x_grid), len(y_grid), len(z_grid)
+                # 构建正确的坐标网格
+                nx_g, ny_g, nz_g = len(x_grid), len(y_grid), len(z_grid)
                 X, Y, Z = np.meshgrid(x_grid, y_grid, z_grid, indexing='ij')
 
-                for i, class_name in enumerate(result['lithology_classes']):
+                for i, class_name in enumerate(lithology_names):
                     if class_name not in selected_lithologies:
                         continue
 
-                    # 创建该岩性的二值场（1表示该岩性，0表示其他）
                     binary_field = (lithology_3d == i).astype(float)
 
-                    # 如果该岩性不存在，跳过
                     if binary_field.sum() == 0:
                         continue
 
-                    # 对二值场进行轻微平滑以获得更好的等值面
                     from scipy.ndimage import gaussian_filter
                     smoothed_field = gaussian_filter(binary_field, sigma=0.8)
 
                     rgb = color_to_rgb(colors[i])
 
-                    # 使用Isosurface绘制等值面
                     fig_3d_model.add_trace(go.Isosurface(
                         x=X.flatten(),
                         y=Y.flatten(),
@@ -1731,7 +1902,7 @@ def main():
 
                 fig_3d_model.update_layout(
                     title=dict(
-                        text="<b>3D Geological Model (Voxel Visualization)</b>",
+                        text=f"<b>3D Geological Model ({model_to_show})</b>",
                         font=dict(size=14, family="Arial", color='#333333'),
                         x=0.5,
                         xanchor='center'
@@ -1757,34 +1928,41 @@ def main():
                     height=700
                 )
 
-                st.plotly_chart(fig_3d_model, width="stretch")
+                st.plotly_chart(fig_3d_model, use_container_width=True)
 
             # 导出按钮
             st.subheader("导出模型")
-            col1, col2, col3 = st.columns(3)
+            col1, col2, col3, col4 = st.columns(4)
 
             project_root = os.path.dirname(os.path.abspath(__file__))
             output_dir = os.path.join(project_root, 'output')
             os.makedirs(output_dir, exist_ok=True)
 
             with col1:
-                if st.button("📥 导出 VTK"):
-                    vtk_path = os.path.join(output_dir, 'geological_model.vtk')
-                    geo_model.export_vtk(vtk_path, result['lithology_classes'])
-                    st.success(f"VTK文件已保存至:\n{vtk_path}")
-                    st.info("提示: 使用 ParaView 打开 VTK 文件进行三维可视化")
+                if has_traditional and st.button("📥 导出传统模型 VTK"):
+                    vtk_path = os.path.join(output_dir, 'geological_model_traditional.vtk')
+                    st.session_state.geo_model.export_vtk(vtk_path, result['lithology_classes'])
+                    st.success(f"已保存: {vtk_path}")
 
             with col2:
-                if st.button("📥 导出 CSV"):
-                    csv_path = os.path.join(output_dir, 'geological_model.csv')
-                    geo_model.export_csv(csv_path, result['lithology_classes'])
-                    st.success(f"CSV文件已保存至:\n{csv_path}")
+                if has_gnn and st.button("📥 导出GNN模型 VTK"):
+                    vtk_path = os.path.join(output_dir, 'geological_model_gnn.vtk')
+                    st.session_state.gnn_model.export_vtk(vtk_path, result['lithology_classes'])
+                    st.success(f"已保存: {vtk_path}")
 
             with col3:
-                if st.button("📥 导出 NumPy"):
-                    npz_path = os.path.join(output_dir, 'geological_model.npz')
-                    geo_model.export_numpy(npz_path)
-                    st.success(f"NumPy文件已保存至:\n{npz_path}")
+                if has_traditional and st.button("📥 导出传统模型 NumPy"):
+                    npz_path = os.path.join(output_dir, 'geological_model_traditional.npz')
+                    st.session_state.geo_model.export_numpy(npz_path)
+                    st.success(f"已保存: {npz_path}")
+
+            with col4:
+                if has_gnn and st.button("📥 导出GNN模型 NumPy"):
+                    npz_path = os.path.join(output_dir, 'geological_model_gnn.npz')
+                    st.session_state.gnn_model.export_numpy(npz_path)
+                    st.success(f"已保存: {npz_path}")
+
+            st.info("提示: 使用 ParaView 打开 VTK 文件进行三维可视化")
 
     # Tab 6: 论文配图
     with tab6:

@@ -720,6 +720,34 @@ def get_model(model_name: str, **kwargs) -> nn.Module:
     return models[model_name.lower()](**kwargs)
 
 
+def get_thickness_model(model_type: str = 'sage', **kwargs) -> nn.Module:
+    """
+    获取厚度预测回归模型
+
+    Args:
+        model_type: 模型类型 ('sage', 'gat')
+        **kwargs: 模型参数
+            - in_channels: 输入特征维度
+            - hidden_channels: 隐藏层维度
+            - num_layers: GNN层数
+            - num_output_layers: 输出的岩层数量
+            - dropout: dropout比率
+
+    Returns:
+        model: 厚度预测模型
+    """
+    from src.layer_modeling import GNNThicknessPredictor
+
+    return GNNThicknessPredictor(
+        in_channels=kwargs.get('in_channels', 4),
+        hidden_channels=kwargs.get('hidden_channels', 128),
+        num_layers=kwargs.get('num_layers', 4),
+        num_output_layers=kwargs.get('num_output_layers', 5),
+        dropout=kwargs.get('dropout', 0.3),
+        model_type=model_type
+    )
+
+
 # ============== 测试代码 ==============
 if __name__ == "__main__":
     # 测试模型

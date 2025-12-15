@@ -98,7 +98,7 @@ pip install torch-geometric
 ### 步骤 4: 安装其他依赖
 
 ```bash
-cd E:/xiangmu/dizhijianmo
+cd D:/xiangmu/dizhijianmo
 pip install -r requirements.txt
 ```
 

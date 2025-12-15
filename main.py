@@ -20,6 +20,7 @@ from src.models import get_model
 from src.data_loader import BoreholeDataProcessor, GridInterpolator
 from src.trainer import GeoModelTrainer, compute_class_weights
 from src.modeling import GeoModel3D, build_geological_model
+from src.gnn_modeling import DirectPredictionModeling, build_gnn_geological_model
 
 
 def run_full_pipeline(
@@ -31,7 +32,8 @@ def run_full_pipeline(
     sample_interval: float = 1.0,     # 稳定采样间隔
     k_neighbors: int = 12,            # 适中的k值，避免过平滑
     grid_resolution: tuple = (50, 50, 50),
-    output_dir: str = 'output'
+    output_dir: str = 'output',
+    modeling_method: str = 'both'     # 'traditional', 'gnn', 'both'
 ):
     """
     完整流程: 数据加载 → 训练 → 建模 → 导出
@@ -158,14 +160,35 @@ def run_full_pipeline(
     print("阶段 4/4: 三维地质建模")
     print("=" * 70)
 
-    geo_model = build_geological_model(
-        trainer=trainer,
-        data=data,
-        result=result,
-        resolution=grid_resolution,
-        interpolation_method='kriging',
-        output_dir=output_dir
-    )
+    geo_model = None
+    gnn_model = None
+
+    # 传统插值建模
+    if modeling_method in ['traditional', 'both']:
+        print("\n[方法1] 传统层面插值建模...")
+        geo_model = build_geological_model(
+            trainer=trainer,
+            data=data,
+            result=result,
+            resolution=grid_resolution,
+            interpolation_method='kriging',
+            output_dir=output_dir
+        )
+
+    # GNN直接预测建模
+    if modeling_method in ['gnn', 'both']:
+        print("\n[方法2] GNN直接预测建模...")
+        gnn_model = build_gnn_geological_model(
+            trainer=trainer,
+            data=data,
+            result=result,
+            method='direct',
+            resolution=grid_resolution,
+            output_dir=output_dir,
+            k_neighbors=8,
+            smooth_output=True,
+            smooth_sigma=0.5
+        )
 
     # 保存预处理器
     processor.save_preprocessor(os.path.join(output_dir, 'preprocessor.json'))
@@ -177,13 +200,19 @@ def run_full_pipeline(
     print(f"\n输出文件:")
     print(f"  模型权重: {output_dir}/models/best_model.pt")
     print(f"  钻孔预测: {output_dir}/predictions.csv")
-    print(f"  三维模型(VTK): {output_dir}/geological_model.vtk")
-    print(f"  三维模型(NumPy): {output_dir}/geological_model.npz")
-    print(f"  三维模型(CSV): {output_dir}/geological_model.csv")
-    print(f"  体积统计: {output_dir}/model_statistics.csv")
+    if modeling_method in ['traditional', 'both']:
+        print(f"\n  [传统方法]")
+        print(f"    三维模型(VTK): {output_dir}/geological_model.vtk (如有)")
+        print(f"    三维模型(NumPy): {output_dir}/geological_model.npz")
+        print(f"    体积统计: {output_dir}/model_statistics.csv")
+    if modeling_method in ['gnn', 'both']:
+        print(f"\n  [GNN直接预测]")
+        print(f"    三维模型(VTK): {output_dir}/gnn_model_direct.vtk")
+        print(f"    三维模型(NumPy): {output_dir}/gnn_model_direct.npz")
+        print(f"    体积统计: {output_dir}/gnn_model_direct_stats.csv")
     print(f"\n提示: VTK文件可用ParaView打开进行三维可视化")
 
-    return trainer, data, result, geo_model
+    return trainer, data, result, geo_model, gnn_model
 
 
 def run_demo():
@@ -348,6 +377,9 @@ def main():
     run_parser.add_argument('--resolution', type=int, nargs=3, default=[50, 50, 50],
                            help='网格分辨率 (nx ny nz)')
     run_parser.add_argument('--output', type=str, default='output')
+    run_parser.add_argument('--modeling-method', type=str, default='both',
+                           choices=['traditional', 'gnn', 'both'],
+                           help='建模方法: traditional=传统插值, gnn=GNN直接预测, both=两者都运行')
 
     # train命令 (仅训练)
     train_parser = subparsers.add_parser('train', help='仅训练模型')
@@ -387,7 +419,8 @@ def main():
             sample_interval=args.sample_interval,
             k_neighbors=args.k_neighbors,
             grid_resolution=tuple(args.resolution),
-            output_dir=args.output
+            output_dir=args.output,
+            modeling_method=args.modeling_method
         )
 
     elif args.command == 'train':

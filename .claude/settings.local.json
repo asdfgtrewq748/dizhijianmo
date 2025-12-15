@@ -21,7 +21,15 @@
       "Bash(C:UsersAdministratoranaconda3envsgeomodelpython.exe -m py_compile E:xiangmudizhijianmoconfigsconfig.py)",
       "Bash(C:UsersAdministratoranaconda3envsgeomodelpython.exe -m py_compile E:xiangmudizhijianmomain.py)",
       "Bash(conda activate geomodel)",
-      "Bash(\"C:\\Users\\Administrator\\anaconda3\\envs\\geomodel\\python.exe\" \"E:\\xiangmu\\dizhijianmo\\main.py\" run --epochs 100)"
+      "Bash(\"C:\\Users\\Administrator\\anaconda3\\envs\\geomodel\\python.exe\" \"E:\\xiangmu\\dizhijianmo\\main.py\" run --epochs 100)",
+      "Bash(C:UsersAdministratoranaconda3envsgeomodelpython.exe -m py_compile D:xiangmudizhijianmosrcgnn_modeling.py)",
+      "Bash(C:UsersAdministratoranaconda3envsgeomodelpython.exe -m py_compile D:xiangmudizhijianmomain.py)",
+      "Bash(cmd /c \"conda activate geomodel && python -c \"\"from src.gnn_modeling import DirectPredictionModeling, build_gnn_geological_model; print(''Import successful!'')\"\"\")",
+      "Bash(C:/ProgramData/anaconda3/python.exe -c \"import sys; print(sys.version); import torch; print(''PyTorch:'', torch.__version__)\")",
+      "Bash(C:UsersAdministratoranaconda3envsgeomodelpython.exe -m py_compile D:xiangmudizhijianmoapp.py)",
+      "Bash(cmd /c \"cd /d D:\\xiangmu\\dizhijianmo && python -m py_compile app.py\")",
+      "Bash(cmd /c \"cd /d D:\\xiangmu\\dizhijianmo && python -m py_compile src/gnn_modeling.py && echo OK\")",
+      "Bash(cmd /c \"cd /d D:\\xiangmu\\dizhijianmo && python -m py_compile src/layer_modeling.py && echo OK\")"
     ]
   }
 }
