@@ -6,7 +6,7 @@
 # ==================== 数据配置 ====================
 DATA_CONFIG = {
     # 图构建参数
-    "k_neighbors": 16,          # KNN邻居数 (16是最佳值)
+    "k_neighbors": 24,          # KNN邻居数 (增加到24获取更多空间上下文)
     "max_distance": None,       # 最大连接距离 (None表示不限制)
     "graph_type": "knn",        # 图类型: 'knn', 'radius', 'delaunay'
 
@@ -15,8 +15,8 @@ DATA_CONFIG = {
     "normalize_features": True, # 是否标准化特征
 
     # 数据划分
-    "test_size": 0.15,          # 测试集比例
-    "val_size": 0.15,           # 验证集比例
+    "test_size": 0.10,          # 测试集比例 (减少以增加训练数据)
+    "val_size": 0.10,           # 验证集比例
     "random_seed": 42           # 随机种子
 }
 
@@ -26,12 +26,12 @@ MODEL_CONFIG = {
     "model_type": "enhanced",   # 恢复使用 enhanced 模型
 
     # 网络结构
-    "hidden_channels": 384,     # 隐藏层维度
-    "num_layers": 2,            # GNN层数 (2层防止过平滑)
-    "dropout": 0.15,            # Dropout比率
+    "hidden_channels": 512,     # 隐藏层维度 (增加模型容量)
+    "num_layers": 3,            # GNN层数 (3层防止过平滑)
+    "dropout": 0.3,             # Dropout比率 (增加对抗过拟合)
 
     # GAT专用参数
-    "gat_heads": 12,            # 注意力头数
+    "gat_heads": 8,             # 注意力头数 (增加)
 
     # GraphSAGE专用参数
     "sage_aggr": "mean"         # 聚合方式
@@ -41,17 +41,17 @@ MODEL_CONFIG = {
 TRAIN_CONFIG = {
     # 优化器
     "optimizer": "adamw",       # 优化器: 'adam', 'adamw'
-    "learning_rate": 0.001,     # 学习率
-    "weight_decay": 1e-4,       # L2正则化
+    "learning_rate": 0.0005,    # 学习率 (降低以提高稳定性)
+    "weight_decay": 5e-4,       # L2正则化 (增加)
 
-    # 学习率调度 - 使用plateau调度器，根据性能自动调整
-    "scheduler": "plateau",     # 调度器: 'plateau' (自适应降低学习率)
-    "scheduler_patience": 50,   # plateau调度器耐心值 (增加到50，更稳定)
+    # 学习率调度 - 使用cosine调度器
+    "scheduler": "cosine",      # 调度器: 'cosine' (更平滑的衰减)
+    "scheduler_patience": 50,   # plateau调度器耐心值
     "scheduler_factor": 0.5,    # 学习率衰减因子
 
     # 训练控制
-    "epochs": 600,              # 最大训练轮数
-    "early_stopping_patience": 120,  # 早停耐心值 (增加到120)
+    "epochs": 1500,             # 最大训练轮数 (延长cosine周期，保持高学习率更久)
+    "early_stopping_patience": 80,  # 早停耐心值
     "min_delta": 1e-5,          # 最小改进阈值
 
     # 类别平衡
@@ -59,19 +59,19 @@ TRAIN_CONFIG = {
 
     # 损失函数优化 - 使用focal loss处理类别不平衡
     "loss_type": "focal",       # 'ce', 'focal', 'label_smoothing'
-    "focal_gamma": 2.0,         # Focal Loss gamma
+    "focal_gamma": 3.0,         # Focal Loss gamma (增加以关注难分类样本)
     "label_smoothing": 0.1,     # 标签平滑系数
 
-    # 数据增强配置 - 降低增强强度以减少波动
+    # 数据增强配置 - 降低强度减少波动
     "use_augmentation": True,   # 启用数据增强
-    "augment_noise_std": 0.02,  # 节点特征噪声标准差 (从0.03降低到0.02)
-    "augment_edge_drop": 0.03,  # 边丢弃概率 (从0.05降低到0.03)
+    "augment_noise_std": 0.005, # 节点特征噪声标准差 (进一步降低)
+    "augment_edge_drop": 0.01,  # 边丢弃概率 (进一步降低)
     "use_mixup": False,         # 是否使用Mixup (对图数据效果有限)
     "mixup_alpha": 0.2,         # Mixup alpha参数
 
-    # EMA配置 - 新增，用于平滑训练
+    # EMA配置 - 用于平滑训练
     "use_ema": True,            # 启用EMA平滑
-    "ema_decay": 0.995          # EMA衰减率 (越接近1越平滑)
+    "ema_decay": 0.9995         # EMA衰减率 (提高以更平滑)
 }
 
 # ==================== 可视化配置 ====================

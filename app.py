@@ -658,37 +658,66 @@ def plot_cross_section(
     return fig
 
 
-def plot_training_history(history: dict) -> go.Figure:
-    """绘制训练历史曲线 - SCI论文质量（增强版）"""
+def plot_training_history(history: dict, smooth_window: int = 20) -> go.Figure:
+    """绘制训练历史曲线 - SCI论文质量（增强版）
+
+    Args:
+        history: 训练历史字典
+        smooth_window: 移动平均窗口大小，用于平滑训练曲线
+    """
     fig = go.Figure()
 
     epochs = list(range(1, len(history['train_loss']) + 1))
     train_loss = history['train_loss']
     val_loss = history['val_loss']
 
+    # 对训练损失进行移动平均平滑
+    def moving_average(data, window):
+        if len(data) < window:
+            return data
+        weights = np.ones(window) / window
+        # 使用 'valid' 模式会缩短数组，改用 'same' 保持长度
+        smoothed = np.convolve(data, weights, mode='same')
+        # 边缘处理：前后各 window//2 个点使用原始值
+        half = window // 2
+        smoothed[:half] = data[:half]
+        smoothed[-half:] = data[-half:]
+        return smoothed.tolist()
+
+    train_loss_smooth = moving_average(train_loss, smooth_window)
+
     # 找到最佳epoch（验证损失最低）
     best_epoch = epochs[np.argmin(val_loss)]
     best_val_loss = min(val_loss)
 
-    # 训练损失 - 带填充区域
+    # 训练损失 - 原始数据（浅色，作为背景）
     fig.add_trace(go.Scatter(
         x=epochs,
         y=train_loss,
-        mode='lines+markers',
-        name='Training Loss',
-        line=dict(color='#3C5488', width=2.5),
-        marker=dict(size=5, symbol='circle'),
-        hovertemplate='Epoch %{x}<br>Train Loss: %{y:.4f}<extra></extra>'
+        mode='lines',
+        name='Training Loss (raw)',
+        line=dict(color='rgba(60, 84, 136, 0.2)', width=1),
+        hovertemplate='Epoch %{x}<br>Train Loss: %{y:.4f}<extra></extra>',
+        showlegend=False
     ))
 
-    # 验证损失
+    # 训练损失 - 平滑后（主曲线）
+    fig.add_trace(go.Scatter(
+        x=epochs,
+        y=train_loss_smooth,
+        mode='lines',
+        name='Training Loss',
+        line=dict(color='#3C5488', width=2.5),
+        hovertemplate='Epoch %{x}<br>Train Loss (smoothed): %{y:.4f}<extra></extra>'
+    ))
+
+    # 验证损失（本身就很稳定，不需要平滑）
     fig.add_trace(go.Scatter(
         x=epochs,
         y=val_loss,
-        mode='lines+markers',
+        mode='lines',
         name='Validation Loss',
         line=dict(color='#E64B35', width=2.5),
-        marker=dict(size=5, symbol='square'),
         hovertemplate='Epoch %{x}<br>Val Loss: %{y:.4f}<extra></extra>'
     ))
 
@@ -734,12 +763,31 @@ def plot_training_history(history: dict) -> go.Figure:
     return fig
 
 
-def plot_accuracy_history(history: dict) -> go.Figure:
-    """绘制准确率曲线 - SCI论文质量（增强版）"""
+def plot_accuracy_history(history: dict, smooth_window: int = 20) -> go.Figure:
+    """绘制准确率曲线 - SCI论文质量（增强版）
+
+    Args:
+        history: 训练历史字典
+        smooth_window: 移动平均窗口大小，用于平滑训练曲线
+    """
     fig = go.Figure()
 
     epochs = list(range(1, len(history['train_acc']) + 1))
+    train_acc = history['train_acc']
     val_acc = history['val_acc']
+
+    # 对训练准确率进行移动平均平滑
+    def moving_average(data, window):
+        if len(data) < window:
+            return data
+        weights = np.ones(window) / window
+        smoothed = np.convolve(data, weights, mode='same')
+        half = window // 2
+        smoothed[:half] = data[:half]
+        smoothed[-half:] = data[-half:]
+        return smoothed.tolist()
+
+    train_acc_smooth = moving_average(train_acc, smooth_window)
 
     # 找到最佳epoch（验证准确率最高）
     best_epoch = epochs[np.argmax(val_acc)]
@@ -752,36 +800,44 @@ def plot_accuracy_history(history: dict) -> go.Figure:
                   annotation_text=f"Random Baseline ({baseline:.1%})",
                   annotation_position="bottom right")
 
-    # 训练准确率
+    # 训练准确率 - 原始数据（浅色背景）
     fig.add_trace(go.Scatter(
         x=epochs,
-        y=history['train_acc'],
-        mode='lines+markers',
-        name='Training Accuracy',
-        line=dict(color='#3C5488', width=2.5),
-        marker=dict(size=5, symbol='circle'),
-        hovertemplate='Epoch %{x}<br>Train Acc: %{y:.4f}<extra></extra>'
+        y=train_acc,
+        mode='lines',
+        name='Training Accuracy (raw)',
+        line=dict(color='rgba(60, 84, 136, 0.2)', width=1),
+        hovertemplate='Epoch %{x}<br>Train Acc: %{y:.4f}<extra></extra>',
+        showlegend=False
     ))
 
-    # 验证准确率
+    # 训练准确率 - 平滑后（主曲线）
+    fig.add_trace(go.Scatter(
+        x=epochs,
+        y=train_acc_smooth,
+        mode='lines',
+        name='Training Accuracy',
+        line=dict(color='#3C5488', width=2.5),
+        hovertemplate='Epoch %{x}<br>Train Acc (smoothed): %{y:.4f}<extra></extra>'
+    ))
+
+    # 验证准确率（本身稳定，不需要平滑）
     fig.add_trace(go.Scatter(
         x=epochs,
         y=val_acc,
-        mode='lines+markers',
+        mode='lines',
         name='Validation Accuracy',
         line=dict(color='#E64B35', width=2.5),
-        marker=dict(size=5, symbol='square'),
         hovertemplate='Epoch %{x}<br>Val Acc: %{y:.4f}<extra></extra>'
     ))
 
-    # F1分数
+    # F1分数（本身稳定，不需要平滑）
     fig.add_trace(go.Scatter(
         x=epochs,
         y=history['val_f1'],
-        mode='lines+markers',
+        mode='lines',
         name='Validation F1-Score',
         line=dict(color='#00A087', width=2.5, dash='dash'),
-        marker=dict(size=5, symbol='diamond'),
         hovertemplate='Epoch %{x}<br>Val F1: %{y:.4f}<extra></extra>'
     ))
 
@@ -953,7 +1009,7 @@ def main():
             options=[0.0008, 0.0010, 0.0015, 0.0020],
             value=0.0010
         )
-        epochs = st.slider("训练轮数", 100, 500, 300)
+        epochs = st.slider("训练轮数", 100, 2000, 500)
         patience = st.slider("早停耐心值", 20, 120, 80)
 
     # 主区域

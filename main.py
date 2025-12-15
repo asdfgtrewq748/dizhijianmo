@@ -88,16 +88,20 @@ def run_full_pipeline(
 
     data = result['data']
 
-    # 创建模型
-    model = get_model(
-        model_name=model_type,
-        in_channels=result['num_features'],
-        hidden_channels=hidden_dim,
-        out_channels=result['num_classes'],
-        num_layers=num_layers,
-        dropout=0.3,  # 适中的Dropout
-        heads=4       # GAT头数
-    )
+    # 创建模型 - 根据模型类型传递不同参数
+    model_kwargs = {
+        'model_name': model_type,
+        'in_channels': result['num_features'],
+        'hidden_channels': hidden_dim,
+        'out_channels': result['num_classes'],
+        'num_layers': num_layers,
+        'dropout': 0.3,
+    }
+    # heads 参数只对 GAT 类模型有效
+    if model_type.lower() in ['gat', 'enhanced', 'transformer']:
+        model_kwargs['heads'] = 4
+
+    model = get_model(**model_kwargs)
 
     print(f"\n模型: {model_type.upper()}")
     print(f"  输入特征: {result['num_features']}")
