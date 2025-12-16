@@ -783,7 +783,10 @@ class LayerBasedGeologicalModeling:
         self.layer_order = None
 
     def _build_grid(self, df: pd.DataFrame, padding: float = 0.05):
-        """构建二维网格（用于厚度预测）和三维网格（用于体素化）"""
+        """构建二维网格（用于厚度预测）和三维网格（用于体素化）
+        
+        注意：z范围会在累加完所有层后根据实际顶面动态调整
+        """
         x_min, x_max = df['x'].min(), df['x'].max()
         y_min, y_max = df['y'].min(), df['y'].max()
         z_min, z_max = df['z'].min(), df['z'].max()
@@ -797,29 +800,30 @@ class LayerBasedGeologicalModeling:
         y_min -= y_range * padding
         y_max += y_range * padding
         
-        # 关键修复：预估累加后的z范围，防止顶面超出网格
-        # 累加所有层的平均厚度来估算顶面高程
+        # 初步z范围（后续会根据累加结果动态调整）
+        # 预留足够大的范围作为初始估计
+        z_range = abs(z_max - z_min)
         if 'layer_thickness' in df.columns and 'lithology' in df.columns:
-            # 估算总厚度：所有层的平均厚度之和
-            total_avg_thickness = df.groupby('lithology')['layer_thickness'].mean().sum()
-            # 留出足够的空间：底面向下10%，顶面向上累加厚度+20%余量
-            z_min = z_min - abs(z_max - z_min) * 0.1
-            z_max = z_min + total_avg_thickness * 1.2
+            # 根据平均厚度粗略估算
+            avg_total_thickness = df.groupby('lithology')['layer_thickness'].mean().sum()
+            z_max_estimate = z_min + max(z_range, avg_total_thickness) * 1.5
         else:
-            # 回退：如果没有厚度信息，假设顶面在地表附近
-            z_max = max(z_max, 0) + abs(z_max - z_min) * 0.5
+            # 回退：假设顶面可能在地表以上
+            z_max_estimate = max(z_max, 0) + z_range * 0.5
+        
+        z_min_estimate = z_min - z_range * 0.1
 
         self.bounds = {
             'x': (x_min, x_max),
             'y': (y_min, y_max),
-            'z': (z_min, z_max)
+            'z': (z_min_estimate, z_max_estimate)
         }
 
         nx, ny, nz = self.resolution
 
         x_grid = np.linspace(x_min, x_max, nx)
         y_grid = np.linspace(y_min, y_max, ny)
-        z_grid = np.linspace(z_min, z_max, nz)
+        z_grid = np.linspace(z_min_estimate, z_max_estimate, nz)
 
         self.grid_info = {
             'x_grid': x_grid,
@@ -1350,6 +1354,26 @@ class LayerBasedGeologicalModeling:
         # 验证垂向顺序
         if verbose:
             self._check_vertical_order(all_bottoms, all_tops, processor.layer_order)
+
+        # 关键修复：根据实际累加后的顶面重新调整z范围和网格
+        actual_z_min = min([b.min() for b in all_bottoms])
+        actual_z_max = max([t.max() for t in all_tops])
+        
+        if verbose:
+            print(f"\n[Z范围调整]")
+            print(f"  原始网格: {z_grid[0]:.1f} ~ {z_grid[-1]:.1f} m")
+            print(f"  实际范围: {actual_z_min:.1f} ~ {actual_z_max:.1f} m")
+        
+        # 如果实际范围超出原网格，重建z网格
+        if actual_z_max > z_grid[-1] or actual_z_min < z_grid[0]:
+            z_margin = (actual_z_max - actual_z_min) * 0.05  # 5%余量
+            new_z_min = actual_z_min - z_margin
+            new_z_max = actual_z_max + z_margin
+            z_grid = np.linspace(new_z_min, new_z_max, nz)
+            self.grid_info['z_grid'] = z_grid
+            self.bounds['z'] = (new_z_min, new_z_max)
+            if verbose:
+                print(f"  调整后网格: {z_grid[0]:.1f} ~ {z_grid[-1]:.1f} m")
 
         # 5. 体素化 - 使用向量化优化
         if verbose:
