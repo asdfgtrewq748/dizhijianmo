@@ -1820,18 +1820,26 @@ def main():
             with vis_col1:
                 st.write("**显示设置**")
                 opacity_3d = st.slider("透明度", 0.1, 1.0, 0.8, key='opacity_3d')
-                show_all_layers = st.checkbox("显示所有岩层", value=True)
+                
+                # 为了防止数据过大，默认不显示所有岩层
+                show_all_layers = st.checkbox("显示所有岩层", value=False, 
+                    help="⚠️ 显示所有岩层可能导致数据量过大")
 
                 if not show_all_layers:
+                    # 默认只显示前5层，避免数据过大
+                    default_count = min(5, len(lithology_names))
                     selected_lithologies = st.multiselect(
                         "选择显示的岩性",
                         lithology_names,
-                        default=lithology_names[:3] if len(lithology_names) > 3 else lithology_names
+                        default=lithology_names[:default_count],
+                        help="建议选择5-10层以避免数据过大"
                     )
                 else:
                     selected_lithologies = lithology_names
+                    if len(lithology_names) > 20:
+                        st.warning("⚠️ 岩层数量较多，可能导致渲染缓慢或超出消息大小限制")
 
-                surface_count = st.slider("曲面精细度", 1, 3, 2, help="值越大曲面越精细，但渲染越慢")
+                surface_count = st.slider("曲面精细度", 1, 3, 1, help="值越大曲面越精细，但数据量越大")
 
                 # 使用上方选择的模型
                 display_model = current_model
@@ -1850,7 +1858,7 @@ def main():
                 
                 # 降采样以避免数据过大导致前端渲染失败
                 nx_orig, ny_orig, nz_orig = lithology_3d.shape
-                max_grid_size = 80  # 限制每个维度最大80个点
+                max_grid_size = 50  # 限制每个维度最大50个点 (50^3 = 125,000点，远小于200MB限制)
                 
                 if nx_orig > max_grid_size or ny_orig > max_grid_size or nz_orig > max_grid_size:
                     # 计算降采样步长
@@ -1864,7 +1872,7 @@ def main():
                     y_grid = y_grid[::step_y]
                     z_grid = z_grid[::step_z]
                     
-                    st.info(f"⚠️ 体素网格已降采样: {nx_orig}×{ny_orig}×{nz_orig} → {len(x_grid)}×{len(y_grid)}×{len(z_grid)} (为防止浏览器内存溢出)")
+                    st.info(f"⚠️ 体素网格已降采样: {nx_orig}×{ny_orig}×{nz_orig} → {len(x_grid)}×{len(y_grid)}×{len(z_grid)} (为防止超出Streamlit 200MB消息限制)")
 
                 # 颜色转换函数
                 def color_to_rgb(color_str):
