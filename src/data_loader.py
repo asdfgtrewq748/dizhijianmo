@@ -34,7 +34,8 @@ class BoreholeDataProcessor:
         graph_type: str = 'knn',            # 图构建方式: 'knn', 'radius', 'delaunay'
         normalize_coords: bool = True,       # 是否标准化坐标
         normalize_features: bool = True,     # 是否标准化特征
-        sample_interval: float = 1.0         # 沿深度方向的采样间隔(米)
+        sample_interval: float = 1.0,        # 沿深度方向的采样间隔(米)
+        merge_coal: bool = True              # 是否合并所有煤层为单一类别
     ):
         self.k_neighbors = k_neighbors
         self.max_distance = max_distance
@@ -42,6 +43,7 @@ class BoreholeDataProcessor:
         self.normalize_coords = normalize_coords
         self.normalize_features = normalize_features
         self.sample_interval = sample_interval
+        self.merge_coal = merge_coal
 
         # 数据预处理器
         self.coord_scaler = StandardScaler()
@@ -841,7 +843,7 @@ class BoreholeDataProcessor:
         feature_cols: Optional[List[str]] = None,
         test_size: float = 0.2,
         val_size: float = 0.1,
-        merge_coal: bool = True
+        merge_coal: Optional[bool] = None
     ) -> Dict:
         """
         处理钻孔数据并创建图数据集
@@ -852,13 +854,15 @@ class BoreholeDataProcessor:
             feature_cols: 要使用的特征列 (None则使用所有可用的数值特征)
             test_size: 测试集比例
             val_size: 验证集比例
-
-        Args:
-            merge_coal: 是否合并所有煤层为单一类别；为 False 时保留独立煤层编号
+            merge_coal: 是否合并所有煤层为单一类别；为 None 时使用初始化时的设置
 
         Returns:
             data_dict: 包含训练/验证/测试数据的字典
         """
+        # 使用实例设置或参数覆盖
+        if merge_coal is None:
+            merge_coal = self.merge_coal
+            
         # 标准化岩性名称
         df = self.standardize_lithology(df, merge_coal=merge_coal)
 
