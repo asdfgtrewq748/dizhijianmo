@@ -40,7 +40,21 @@
       "Bash(\"C:/Users/Administrator/anaconda3/envs/geomodel/python.exe\" -c \"import sys; sys.path.insert(0, ''E:/xiangmu/dizhijianmo''); from src.data_loader import BoreholeDataProcessor; print(''Import OK'')\")",
       "Bash(\"C:/Users/Administrator/anaconda3/envs/geomodel/python.exe\" -m py_compile \"E:\\xiangmu\\dizhijianmo\\src\\data_loader.py\")",
       "Bash(\"C:/Users/Administrator/anaconda3/envs/geomodel/python.exe\" -m py_compile \"E:\\xiangmu\\dizhijianmo\\src\\layer_modeling.py\")",
-      "Bash(\"C:/Users/Administrator/anaconda3/envs/geomodel/python.exe\" -m py_compile \"E:\\xiangmu\\dizhijianmo\\app.py\")"
+      "Bash(\"C:/Users/Administrator/anaconda3/envs/geomodel/python.exe\" -m py_compile \"E:\\xiangmu\\dizhijianmo\\app.py\")",
+      "Bash(\"C:/Users/Administrator/anaconda3/envs/geomodel/python.exe\" -m py_compile \"D:\\xiangmu\\dizhijianmo\\src\\gnn_thickness_modeling.py\")",
+      "Bash(\"C:/Users/Administrator/anaconda3/envs/geomodel/python.exe\" -m py_compile \"D:\\xiangmu\\dizhijianmo\\src\\thickness_data_loader.py\")",
+      "Bash(\"C:/Users/Administrator/anaconda3/envs/geomodel/python.exe\" -m py_compile \"D:\\xiangmu\\dizhijianmo\\src\\thickness_trainer.py\")",
+      "Bash(\"C:/Users/Administrator/anaconda3/envs/geomodel/python.exe\" -m py_compile \"D:\\xiangmu\\dizhijianmo\\main_thickness.py\")",
+      "Bash(C:ProgramDataanaconda3python.exe -c \"import torch; print(''PyTorch version:'', torch.__version__)\")",
+      "Bash(cmd /c \"C:\\ProgramData\\anaconda3\\python.exe -c \"\"import torch; print(''PyTorch version:'', torch.__version__)\"\"\")",
+      "Bash(cmd /c \"cd /d D:\\xiangmu\\dizhijianmo && conda activate geomodel && python -c \"\"import torch; print(''PyTorch:'', torch.__version__)\"\" 2>&1\")",
+      "Bash(if not exist legacysrc mkdir legacysrc)",
+      "Bash(cmd /c \"cd /d D:\\xiangmu\\dizhijianmo && if not exist legacy mkdir legacy && if not exist legacy\\src mkdir legacy\\src\")",
+      "Bash(cmd /c \"cd /d D:\\xiangmu\\dizhijianmo && copy src\\modeling.py legacy\\src\\ && copy src\\gnn_modeling.py legacy\\src\\ && copy src\\layer_modeling.py legacy\\src\\ && copy src\\data_loader.py legacy\\src\\ && copy src\\trainer.py legacy\\src\\ && copy src\\augmentation.py legacy\\src\\ && copy main.py legacy\\ && copy app.py legacy\\ && echo 复制完成\")",
+      "Bash(cmd /c \"move /Y D:\\xiangmu\\dizhijianmo\\app.py D:\\xiangmu\\dizhijianmo\\legacy\\app.py\")",
+      "Bash(cmd /c \"move /Y D:\\xiangmu\\dizhijianmo\\app_new.py D:\\xiangmu\\dizhijianmo\\app.py\")",
+      "Bash(cmd /c \"dir D:\\xiangmu\\dizhijianmo\\app.py && dir D:\\xiangmu\\dizhijianmo\\legacy\\app.py\")",
+      "Bash(\"C:/Users/Administrator/anaconda3/envs/geomodel/python.exe\":*)"
     ]
   }
 }
