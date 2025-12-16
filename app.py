@@ -12,6 +12,8 @@ import pandas as pd
 import torch
 import os
 import sys
+import base64
+from pathlib import Path
 
 # 添加项目路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -22,7 +24,24 @@ from src.gnn_thickness_modeling import (
     GNNThicknessPredictor, GeologicalModelBuilder,
     GNNGeologicalModeling, TraditionalThicknessInterpolator
 )
-from src.thickness_trainer import create_trainer, ThicknessTrainer, ThicknessEvaluator
+from src.thickness_trainer import (
+    create_trainer, ThicknessTrainer, ThicknessEvaluator,
+    k_fold_cross_validation, get_optimized_config_for_small_dataset
+)
+
+# 尝试导入 PyVista 渲染器
+PYVISTA_AVAILABLE = False
+try:
+    import pyvista as pv
+    from src.pyvista_renderer import (
+        GeologicalModelRenderer, RockMaterial, TextureGenerator,
+        render_geological_model
+    )
+    PYVISTA_AVAILABLE = True
+    # 设置 PyVista 为离屏渲染模式
+    pv.OFF_SCREEN = True
+except ImportError as e:
+    print(f"PyVista 未安装或导入失败: {e}")
 
 # ==================== 页面配置 ====================
 st.set_page_config(
@@ -59,16 +78,206 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# 配色方案
-GEOLOGY_COLORS = [
-    '#E64B35', '#4DBBD5', '#00A087', '#3C5488', '#F39B7F',
-    '#8491B4', '#91D1C2', '#DC0000', '#7E6148', '#B09C85',
+# ==================== 地质岩石配色与材质系统 ====================
+
+# 基于真实岩石的专业配色方案
+ROCK_COLORS = {
+    # 煤层 - 黑色系
+    '煤': {'base': '#1a1a1a', 'highlight': '#333333', 'shadow': '#0d0d0d'},
+    '煤层': {'base': '#1a1a1a', 'highlight': '#333333', 'shadow': '#0d0d0d'},
+
+    # 砂岩 - 黄褐色系
+    '砂岩': {'base': '#c4a35a', 'highlight': '#d4b76a', 'shadow': '#a48940'},
+    '细砂岩': {'base': '#d4b878', 'highlight': '#e4c888', 'shadow': '#b49858'},
+    '中砂岩': {'base': '#c4a35a', 'highlight': '#d4b76a', 'shadow': '#a48940'},
+    '粗砂岩': {'base': '#b49347', 'highlight': '#c4a357', 'shadow': '#947327'},
+
+    # 泥岩 - 灰绿色系
+    '泥岩': {'base': '#6b7b6b', 'highlight': '#7b8b7b', 'shadow': '#5b6b5b'},
+    '砂质泥岩': {'base': '#7a8a72', 'highlight': '#8a9a82', 'shadow': '#6a7a62'},
+
+    # 页岩 - 深灰色系
+    '页岩': {'base': '#4a5568', 'highlight': '#5a6578', 'shadow': '#3a4558'},
+    '炭质页岩': {'base': '#3d4852', 'highlight': '#4d5862', 'shadow': '#2d3842'},
+
+    # 粉砂岩 - 浅褐色系
+    '粉砂岩': {'base': '#a89078', 'highlight': '#b8a088', 'shadow': '#988068'},
+
+    # 灰�ite - 灰蓝色系
+    '灰岩': {'base': '#8b9daa', 'highlight': '#9badba', 'shadow': '#7b8d9a'},
+    '石灰岩': {'base': '#8b9daa', 'highlight': '#9badba', 'shadow': '#7b8d9a'},
+
+    # 砾岩 - 棕红色系
+    '砾岩': {'base': '#8b5a3c', 'highlight': '#9b6a4c', 'shadow': '#7b4a2c'},
+
+    # 表土/黏土 - 土黄色系
+    '表土': {'base': '#b5956c', 'highlight': '#c5a57c', 'shadow': '#a5855c'},
+    '黏土': {'base': '#9a8060', 'highlight': '#aa9070', 'shadow': '#8a7050'},
+    '土层': {'base': '#b5956c', 'highlight': '#c5a57c', 'shadow': '#a5855c'},
+}
+
+# 默认配色（用于未指定岩性）
+DEFAULT_COLORS = [
+    {'base': '#E64B35', 'highlight': '#F65B45', 'shadow': '#D63B25'},
+    {'base': '#4DBBD5', 'highlight': '#5DCBE5', 'shadow': '#3DABC5'},
+    {'base': '#00A087', 'highlight': '#10B097', 'shadow': '#009077'},
+    {'base': '#3C5488', 'highlight': '#4C6498', 'shadow': '#2C4478'},
+    {'base': '#F39B7F', 'highlight': '#FFAB8F', 'shadow': '#E38B6F'},
+    {'base': '#8491B4', 'highlight': '#94A1C4', 'shadow': '#7481A4'},
+    {'base': '#91D1C2', 'highlight': '#A1E1D2', 'shadow': '#81C1B2'},
+    {'base': '#7E6148', 'highlight': '#8E7158', 'shadow': '#6E5138'},
 ]
 
+def get_rock_color(rock_name):
+    """获取岩石的专业配色"""
+    # 尝试精确匹配
+    if rock_name in ROCK_COLORS:
+        return ROCK_COLORS[rock_name]
+
+    # 尝试模糊匹配
+    for key in ROCK_COLORS:
+        if key in rock_name or rock_name in key:
+            return ROCK_COLORS[key]
+
+    return None
+
 def get_color_map(layer_order):
-    """获取岩层颜色映射"""
-    colors = GEOLOGY_COLORS * (len(layer_order) // len(GEOLOGY_COLORS) + 1)
-    return {name: colors[i] for i, name in enumerate(layer_order)}
+    """获取岩层颜色映射（增强版）"""
+    color_map = {}
+    default_idx = 0
+
+    for name in layer_order:
+        rock_color = get_rock_color(name)
+        if rock_color:
+            color_map[name] = rock_color['base']
+        else:
+            color_map[name] = DEFAULT_COLORS[default_idx % len(DEFAULT_COLORS)]['base']
+            default_idx += 1
+
+    return color_map
+
+def get_full_color_map(layer_order):
+    """获取完整的岩层颜色映射（包含高光和阴影色）"""
+    color_map = {}
+    default_idx = 0
+
+    for name in layer_order:
+        rock_color = get_rock_color(name)
+        if rock_color:
+            color_map[name] = rock_color
+        else:
+            color_map[name] = DEFAULT_COLORS[default_idx % len(DEFAULT_COLORS)]
+            default_idx += 1
+
+    return color_map
+
+def generate_rock_texture(shape, rock_type='sandstone', intensity=0.15):
+    """
+    生成程序化岩石纹理
+
+    Args:
+        shape: 网格形状 (rows, cols)
+        rock_type: 岩石类型
+        intensity: 纹理强度 (0-1)
+
+    Returns:
+        纹理数组，值域 [-intensity, intensity]
+    """
+    rows, cols = shape
+    texture = np.zeros((rows, cols))
+
+    if rock_type in ['coal', '煤', '煤层']:
+        # 煤层 - 层状纹理
+        for i in range(3):
+            freq = 0.1 * (i + 1)
+            texture += np.sin(np.linspace(0, 4*np.pi*freq, cols)) * (0.5 ** i)
+        texture = np.tile(texture, (rows, 1))
+
+    elif rock_type in ['sandstone', '砂岩', '细砂岩', '中砂岩', '粗砂岩']:
+        # 砂岩 - 颗粒状纹理
+        np.random.seed(42)
+        noise = np.random.randn(rows, cols)
+        # 高斯平滑
+        from scipy.ndimage import gaussian_filter
+        texture = gaussian_filter(noise, sigma=1.5)
+
+    elif rock_type in ['mudstone', '泥岩', '砂质泥岩']:
+        # 泥岩 - 平滑层理
+        y = np.linspace(0, 2*np.pi, rows)
+        x = np.linspace(0, 4*np.pi, cols)
+        X, Y = np.meshgrid(x, y)
+        texture = np.sin(Y * 2) * 0.5 + np.sin(X * 0.5) * 0.3
+
+    elif rock_type in ['shale', '页岩', '炭质页岩']:
+        # 页岩 - 薄层状纹理
+        for i in range(rows):
+            texture[i, :] = np.sin(i * 0.5) * 0.7 + np.random.randn(cols) * 0.3
+
+    elif rock_type in ['limestone', '灰岩', '石灰岩']:
+        # 灰岩 - 不规则块状
+        np.random.seed(42)
+        texture = np.random.randn(rows, cols)
+        from scipy.ndimage import gaussian_filter
+        texture = gaussian_filter(texture, sigma=3)
+
+    elif rock_type in ['conglomerate', '砾岩']:
+        # 砾岩 - 大颗粒纹理
+        np.random.seed(42)
+        texture = np.random.randn(rows // 3 + 1, cols // 3 + 1)
+        texture = np.repeat(np.repeat(texture, 3, axis=0), 3, axis=1)[:rows, :cols]
+
+    else:
+        # 默认 - 轻微噪声
+        np.random.seed(42)
+        texture = np.random.randn(rows, cols) * 0.5
+        from scipy.ndimage import gaussian_filter
+        texture = gaussian_filter(texture, sigma=2)
+
+    # 归一化到指定强度范围
+    if texture.max() != texture.min():
+        texture = (texture - texture.min()) / (texture.max() - texture.min())
+        texture = texture * 2 * intensity - intensity
+
+    return texture
+
+def hex_to_rgb(hex_color):
+    """将十六进制颜色转换为RGB元组"""
+    hex_color = hex_color.lstrip('#')
+    return tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+
+def rgb_to_hex(rgb):
+    """将RGB元组转换为十六进制颜色"""
+    return '#{:02x}{:02x}{:02x}'.format(
+        max(0, min(255, int(rgb[0]))),
+        max(0, min(255, int(rgb[1]))),
+        max(0, min(255, int(rgb[2])))
+    )
+
+def create_textured_colorscale(base_color, texture_intensity=0.15):
+    """
+    创建带纹理效果的颜色比例尺
+
+    Args:
+        base_color: 基础颜色（十六进制）
+        texture_intensity: 纹理强度
+
+    Returns:
+        Plotly colorscale列表
+    """
+    base_rgb = hex_to_rgb(base_color)
+
+    # 创建颜色渐变，模拟光照效果
+    colorscale = []
+    steps = 10
+
+    for i in range(steps + 1):
+        t = i / steps
+        # 从阴影到高光
+        factor = 0.7 + 0.6 * t  # 从0.7到1.3
+        adjusted_rgb = tuple(min(255, int(c * factor)) for c in base_rgb)
+        colorscale.append([t, rgb_to_hex(adjusted_rgb)])
+
+    return colorscale
 
 
 # ==================== 主应用 ====================
@@ -91,20 +300,57 @@ def main():
         st.subheader("📊 数据配置")
         merge_coal = st.checkbox("合并煤层", value=False,
                                   help="是否将所有煤层合并为单一类别")
+        layer_method = st.selectbox(
+            "层序推断方法",
+            ['position_based', 'simple', 'marker_based'],
+            index=0,
+            help="""
+            - position_based: 按位置区分重复层（推荐，如粉砂岩_1、粉砂岩_2）
+            - simple: 简单合并同名层（会丢失重复层）
+            - marker_based: 以煤层为标志层对齐
+            """
+        )
+        if layer_method == 'position_based':
+            min_occurrence_rate = st.slider(
+                "最小出现率",
+                0.1, 0.8, 0.5,
+                help="只保留出现率高于此值的地层，提高此值可减少层数"
+            )
+        else:
+            min_occurrence_rate = 0.3
         k_neighbors = st.slider("K邻居数", 4, 20, 10, help="增加邻居数可提高空间关联性")
 
         st.subheader("🧠 模型配置")
-        hidden_dim = st.selectbox("隐藏层维度", [128, 256, 512], index=1, help="更大的维度可提高表达能力")
-        gnn_layers = st.slider("GNN层数", 2, 6, 4, help="更深的网络可捕获更远距离的空间关系")
-        conv_type = st.selectbox("卷积类型", ['gatv2', 'transformer', 'sage'], help="GATv2通常效果最好")
-        dropout = st.slider("Dropout", 0.0, 0.5, 0.1, help="较小的dropout避免欠拟合")
 
-        st.subheader("🎯 训练配置")
-        epochs = st.slider("训练轮数", 100, 1000, 500, help="更多轮数通常效果更好")
-        learning_rate = st.select_slider("学习率",
-                                          options=[0.0001, 0.0005, 0.001, 0.002],
-                                          value=0.0005, help="较小的学习率更稳定")
-        patience = st.slider("早停耐心值", 20, 100, 50, help="更大的耐心值避免过早停止")
+        # 添加自动配置选项
+        use_auto_config = st.checkbox(
+            "🤖 自动优化配置（推荐）",
+            value=True,
+            help="根据数据规模自动选择最优超参数，特别适合小样本数据"
+        )
+
+        if use_auto_config:
+            st.info("✅ 将根据数据规模自动优化所有参数")
+            # 用于显示，实际值在训练时计算
+            hidden_dim = 128
+            gnn_layers = 3
+            dropout = 0.2
+            conv_type = 'gatv2'
+            epochs = 200
+            learning_rate = 0.001
+            patience = 30
+        else:
+            hidden_dim = st.selectbox("隐藏层维度", [64, 96, 128, 160, 256], index=2, help="更大的维度可提高表达能力")
+            gnn_layers = st.slider("GNN层数", 2, 4, 3, help="更深的网络可捕获更远距离的空间关系")
+            conv_type = st.selectbox("卷积类型", ['gatv2', 'transformer', 'sage'], help="GATv2通常效果最好")
+            dropout = st.slider("Dropout", 0.0, 0.5, 0.2, step=0.05, help="防止过拟合")
+
+            st.subheader("🎯 训练配置")
+            epochs = st.slider("训练轮数", 100, 500, 200, help="更多轮数通常效果更好")
+            learning_rate = st.select_slider("学习率",
+                                              options=[0.0001, 0.0005, 0.001, 0.002, 0.005],
+                                              value=0.001, help="较小的学习率更稳定")
+            patience = st.slider("早停耐心值", 15, 50, 30, help="更大的耐心值避免过早停止")
 
         st.subheader("🗺️ 建模配置")
         resolution = st.slider("网格分辨率", 20, 100, 50)
@@ -143,11 +389,17 @@ def main():
                             k_neighbors=k_neighbors,
                             graph_type='knn'
                         )
-                        result = processor.process_directory(data_dir)
+                        result = processor.process_directory(
+                            data_dir,
+                            layer_method=layer_method,
+                            min_occurrence_rate=min_occurrence_rate
+                        )
                         st.session_state.data_result = result
                         st.success(f"✅ 数据加载成功!")
                     except Exception as e:
                         st.error(f"❌ 加载失败: {str(e)}")
+                        import traceback
+                        st.code(traceback.format_exc())
 
         with col2:
             if st.session_state.data_result is not None:
@@ -223,41 +475,174 @@ def main():
             st.write(f"**任务类型:** 厚度回归")
             st.write(f"**输入特征:** {result['num_features']}")
             st.write(f"**输出层数:** {result['num_layers']}")
-            st.write(f"**卷积类型:** {conv_type.upper()}")
+            st.write(f"**钻孔数量:** {result['data'].x.shape[0]}")
+
+            # K-fold选项
+            use_kfold = st.checkbox(
+                "使用K-fold交叉验证",
+                value=False,
+                help="对于小样本数据，K-fold交叉验证可以更准确地评估模型性能"
+            )
+
+            if use_kfold:
+                n_splits = st.selectbox("Fold数量", [3, 5, 10], index=1)
+                st.info(f"将进行{n_splits}-fold交叉验证，评估更可靠但耗时更长")
 
             if st.button("🚀 开始训练", type="primary"):
                 with st.spinner("正在训练模型..."):
                     try:
-                        # 创建模型和训练器
-                        model, trainer = create_trainer(
-                            num_features=result['num_features'],
-                            num_layers=result['num_layers'],
-                            hidden_channels=hidden_dim,
-                            gnn_layers=gnn_layers,
-                            dropout=dropout,
-                            conv_type=conv_type,
-                            learning_rate=learning_rate
-                        )
+                        # 获取优化配置（如果启用自动配置）
+                        if use_auto_config:
+                            n_samples = result['data'].x.shape[0]
+                            n_layers = result['num_layers']
+                            n_features = result['num_features']
 
-                        # 训练
-                        history = trainer.train(
-                            data=result['data'],
-                            epochs=epochs,
-                            patience=patience,
-                            verbose=False
-                        )
+                            opt_config = get_optimized_config_for_small_dataset(
+                                n_samples=n_samples,
+                                n_layers=n_layers,
+                                n_features=n_features
+                            )
 
-                        st.session_state.model = model
-                        st.session_state.trainer = trainer
-                        st.session_state.history = history
+                            st.info("📊 自动配置分析:")
+                            st.json({
+                                "样本数": n_samples,
+                                "层数": n_layers,
+                                "推荐模型": opt_config['model'],
+                                "推荐训练": opt_config['training'],
+                                "K-fold建议": opt_config['kfold']['reason'] if 'kfold' in opt_config else "N/A"
+                            })
+
+                            # 使用优化的配置
+                            hidden_dim = opt_config['model']['hidden_channels']
+                            gnn_layers = opt_config['model']['num_layers']
+                            dropout = opt_config['model']['dropout']
+                            learning_rate = opt_config['trainer']['learning_rate']
+                            epochs = opt_config['training']['epochs']
+                            patience = opt_config['training']['patience']
+
+                            # 如果建议使用K-fold但用户没选，给出提示
+                            if opt_config['kfold']['use_kfold'] and not use_kfold:
+                                st.warning(f"⚠️ {opt_config['kfold']['reason']}")
+
+                        if use_kfold:
+                            # K-fold交叉验证
+                            st.write("### K-fold交叉验证训练中...")
+
+                            # 创建模型类和参数
+                            model_kwargs = {
+                                'in_channels': result['num_features'],
+                                'hidden_channels': hidden_dim,
+                                'num_layers': gnn_layers,
+                                'num_output_layers': result['num_layers'],
+                                'dropout': dropout,
+                                'conv_type': conv_type
+                            }
+
+                            trainer_kwargs = {
+                                'learning_rate': learning_rate,
+                                'use_augmentation': use_auto_config,  # 自动配置时启用增强
+                                'scheduler_type': 'plateau' if n_samples < 30 else 'cosine'
+                            }
+
+                            # 执行K-fold交叉验证
+                            cv_results = k_fold_cross_validation(
+                                model_class=GNNThicknessPredictor,
+                                model_kwargs=model_kwargs,
+                                data=result['data'],
+                                n_splits=n_splits,
+                                epochs=epochs,
+                                patience=patience,
+                                trainer_kwargs=trainer_kwargs,
+                                verbose=True
+                            )
+
+                            st.session_state.cv_results = cv_results
+                            st.session_state.use_kfold = True
+
+                            # 使用最佳fold的模型
+                            best_fold_idx = np.argmin([r['test_metrics']['mae'] for r in cv_results['fold_results']])
+                            st.info(f"✅ 交叉验证完成! 最佳fold: {best_fold_idx + 1}")
+
+                        else:
+                            # 普通训练
+                            # 创建模型和训练器
+                            model, trainer = create_trainer(
+                                num_features=result['num_features'],
+                                num_layers=result['num_layers'],
+                                hidden_channels=hidden_dim,
+                                gnn_layers=gnn_layers,
+                                dropout=dropout,
+                                conv_type=conv_type,
+                                learning_rate=learning_rate,
+                                use_augmentation=use_auto_config,  # 自动配置时启用增强
+                                scheduler_type='plateau' if use_auto_config and result['data'].x.shape[0] < 30 else 'cosine'
+                            )
+
+                            # 训练
+                            history = trainer.train(
+                                data=result['data'],
+                                epochs=epochs,
+                                patience=patience,
+                                warmup_epochs=20 if use_auto_config else 0,
+                                verbose=False
+                            )
+
+                            st.session_state.model = model
+                            st.session_state.trainer = trainer
+                            st.session_state.history = history
+                            st.session_state.use_kfold = False
 
                         st.success("✅ 训练完成!")
 
                     except Exception as e:
                         st.error(f"❌ 训练失败: {str(e)}")
+                        import traceback
+                        st.code(traceback.format_exc())
 
         with col2:
-            if st.session_state.history is not None:
+            # K-fold结果显示
+            if st.session_state.get('use_kfold', False) and st.session_state.get('cv_results') is not None:
+                cv_results = st.session_state.cv_results
+
+                st.subheader("K-Fold交叉验证结果")
+
+                # 汇总指标
+                col_a, col_b, col_c = st.columns(3)
+                col_a.metric("平均MAE", f"{cv_results['mae_mean']:.3f} ± {cv_results['mae_std']:.3f} m")
+                col_b.metric("平均RMSE", f"{cv_results['rmse_mean']:.3f} ± {cv_results['rmse_std']:.3f} m")
+                col_c.metric("平均R²", f"{cv_results['r2_mean']:.3f} ± {cv_results['r2_std']:.3f}")
+
+                # 每个fold的结果
+                st.subheader("各Fold结果")
+                fold_df = pd.DataFrame([
+                    {
+                        'Fold': r['fold'],
+                        'MAE (m)': f"{r['test_metrics']['mae']:.3f}",
+                        'RMSE (m)': f"{r['test_metrics']['rmse']:.3f}",
+                        'R²': f"{r['test_metrics']['r2']:.3f}"
+                    }
+                    for r in cv_results['fold_results']
+                ])
+                st.dataframe(fold_df, use_container_width=True)
+
+                # 可视化各fold的性能
+                fig = go.Figure()
+                folds = [r['fold'] for r in cv_results['fold_results']]
+                maes = [r['test_metrics']['mae'] for r in cv_results['fold_results']]
+                rmses = [r['test_metrics']['rmse'] for r in cv_results['fold_results']]
+
+                fig.add_trace(go.Bar(x=folds, y=maes, name='MAE', marker_color='#E64B35'))
+                fig.add_trace(go.Bar(x=folds, y=rmses, name='RMSE', marker_color='#4DBBD5'))
+                fig.update_layout(
+                    xaxis_title='Fold',
+                    yaxis_title='误差 (m)',
+                    height=400,
+                    barmode='group'
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+            # 普通训练结果显示
+            elif st.session_state.history is not None:
                 history = st.session_state.history
 
                 # 训练曲线
@@ -427,41 +812,391 @@ def main():
                 YI = st.session_state.grid_YI
                 color_map = get_color_map(result['layer_order'])
 
-                # 选择显示的层
-                show_layers = st.multiselect(
-                    "选择显示的地层",
-                    result['layer_order'],
-                    default=result['layer_order']
-                )
+                # 可视化设置
+                st.subheader("显示设置")
+                col_opt1, col_opt2, col_opt3 = st.columns(3)
+
+                with col_opt1:
+                    show_layers = st.multiselect(
+                        "选择显示的地层",
+                        result['layer_order'],
+                        default=result['layer_order'][:min(5, len(result['layer_order']))]
+                    )
+
+                with col_opt2:
+                    render_mode = st.selectbox(
+                        "渲染模式",
+                        ['增强材质', '基础渲染', '线框模式'],
+                        index=0,
+                        help="增强材质：带纹理和光照效果"
+                    )
+
+                with col_opt3:
+                    show_sides = st.checkbox("显示侧面", value=True, help="显示地层侧面轮廓")
+                    surface_opacity = st.slider("透明度", 0.3, 1.0, 0.85)
+
+                # 获取完整颜色映射（包含高光和阴影）
+                full_color_map = get_full_color_map(result['layer_order'])
 
                 fig = go.Figure()
+
                 for bm in block_models:
                     if bm.name not in show_layers:
                         continue
 
-                    color = color_map[bm.name]
+                    colors = full_color_map[bm.name]
+                    base_color = colors['base']
 
-                    # 顶面
-                    fig.add_trace(go.Surface(
-                        x=XI, y=YI, z=bm.top_surface,
-                        colorscale=[[0, color], [1, color]],
-                        showscale=False,
-                        opacity=0.8,
-                        name=f"{bm.name} (顶)"
+                    if render_mode == '增强材质':
+                        # 生成纹理
+                        texture = generate_rock_texture(
+                            XI.shape, rock_type=bm.name, intensity=0.12
+                        )
+                        # 使用纹理作为surfacecolor
+                        surface_color = texture
+
+                        # 创建带纹理的colorscale
+                        colorscale = create_textured_colorscale(base_color)
+
+                        # 顶面 - 带纹理和光照
+                        fig.add_trace(go.Surface(
+                            x=XI, y=YI, z=bm.top_surface,
+                            surfacecolor=surface_color,
+                            colorscale=colorscale,
+                            showscale=False,
+                            opacity=surface_opacity,
+                            name=f"{bm.name} (顶)",
+                            lighting=dict(
+                                ambient=0.6,
+                                diffuse=0.8,
+                                specular=0.3,
+                                roughness=0.8,
+                                fresnel=0.2
+                            ),
+                            lightposition=dict(x=1000, y=1000, z=2000),
+                            hovertemplate=f"<b>{bm.name}</b><br>X: %{{x:.1f}}m<br>Y: %{{y:.1f}}m<br>Z: %{{z:.1f}}m<extra></extra>"
+                        ))
+
+                        # 底面
+                        fig.add_trace(go.Surface(
+                            x=XI, y=YI, z=bm.bottom_surface,
+                            surfacecolor=surface_color * 0.8,  # 稍暗的纹理
+                            colorscale=colorscale,
+                            showscale=False,
+                            opacity=surface_opacity * 0.7,
+                            name=f"{bm.name} (底)",
+                            lighting=dict(
+                                ambient=0.5,
+                                diffuse=0.6,
+                                specular=0.2,
+                                roughness=0.9,
+                                fresnel=0.1
+                            ),
+                            hovertemplate=f"<b>{bm.name} 底面</b><br>X: %{{x:.1f}}m<br>Y: %{{y:.1f}}m<br>Z: %{{z:.1f}}m<extra></extra>"
+                        ))
+
+                    elif render_mode == '线框模式':
+                        # 线框渲染
+                        fig.add_trace(go.Surface(
+                            x=XI, y=YI, z=bm.top_surface,
+                            colorscale=[[0, base_color], [1, base_color]],
+                            showscale=False,
+                            opacity=0.3,
+                            name=f"{bm.name}",
+                            contours=dict(
+                                x=dict(show=True, color='black', width=1),
+                                y=dict(show=True, color='black', width=1),
+                                z=dict(show=True, color='black', width=2)
+                            )
+                        ))
+
+                    else:
+                        # 基础渲染
+                        fig.add_trace(go.Surface(
+                            x=XI, y=YI, z=bm.top_surface,
+                            colorscale=[[0, base_color], [1, base_color]],
+                            showscale=False,
+                            opacity=surface_opacity,
+                            name=f"{bm.name}"
+                        ))
+
+                    # 添加侧面
+                    if show_sides and render_mode != '线框模式':
+                        shadow_color = colors.get('shadow', base_color)
+
+                        # 四个边的侧面
+                        n = XI.shape[0]
+
+                        # 前侧面 (y=0)
+                        for i in range(n - 1):
+                            x_side = [XI[0, i], XI[0, i+1], XI[0, i+1], XI[0, i], XI[0, i]]
+                            y_side = [YI[0, i], YI[0, i+1], YI[0, i+1], YI[0, i], YI[0, i]]
+                            z_side = [bm.bottom_surface[0, i], bm.bottom_surface[0, i+1],
+                                     bm.top_surface[0, i+1], bm.top_surface[0, i], bm.bottom_surface[0, i]]
+                            fig.add_trace(go.Scatter3d(
+                                x=x_side, y=y_side, z=z_side,
+                                mode='lines',
+                                line=dict(color=shadow_color, width=1),
+                                showlegend=False,
+                                hoverinfo='skip'
+                            ))
+
+                        # 后侧面 (y=max)
+                        for i in range(n - 1):
+                            x_side = [XI[-1, i], XI[-1, i+1], XI[-1, i+1], XI[-1, i], XI[-1, i]]
+                            y_side = [YI[-1, i], YI[-1, i+1], YI[-1, i+1], YI[-1, i], YI[-1, i]]
+                            z_side = [bm.bottom_surface[-1, i], bm.bottom_surface[-1, i+1],
+                                     bm.top_surface[-1, i+1], bm.top_surface[-1, i], bm.bottom_surface[-1, i]]
+                            fig.add_trace(go.Scatter3d(
+                                x=x_side, y=y_side, z=z_side,
+                                mode='lines',
+                                line=dict(color=shadow_color, width=1),
+                                showlegend=False,
+                                hoverinfo='skip'
+                            ))
+
+                        # 左侧面 (x=0)
+                        for j in range(n - 1):
+                            x_side = [XI[j, 0], XI[j+1, 0], XI[j+1, 0], XI[j, 0], XI[j, 0]]
+                            y_side = [YI[j, 0], YI[j+1, 0], YI[j+1, 0], YI[j, 0], YI[j, 0]]
+                            z_side = [bm.bottom_surface[j, 0], bm.bottom_surface[j+1, 0],
+                                     bm.top_surface[j+1, 0], bm.top_surface[j, 0], bm.bottom_surface[j, 0]]
+                            fig.add_trace(go.Scatter3d(
+                                x=x_side, y=y_side, z=z_side,
+                                mode='lines',
+                                line=dict(color=shadow_color, width=1),
+                                showlegend=False,
+                                hoverinfo='skip'
+                            ))
+
+                        # 右侧面 (x=max)
+                        for j in range(n - 1):
+                            x_side = [XI[j, -1], XI[j+1, -1], XI[j+1, -1], XI[j, -1], XI[j, -1]]
+                            y_side = [YI[j, -1], YI[j+1, -1], YI[j+1, -1], YI[j, -1], YI[j, -1]]
+                            z_side = [bm.bottom_surface[j, -1], bm.bottom_surface[j+1, -1],
+                                     bm.top_surface[j+1, -1], bm.top_surface[j, -1], bm.bottom_surface[j, -1]]
+                            fig.add_trace(go.Scatter3d(
+                                x=x_side, y=y_side, z=z_side,
+                                mode='lines',
+                                line=dict(color=shadow_color, width=1),
+                                showlegend=False,
+                                hoverinfo='skip'
+                            ))
+
+                # 添加图例
+                for layer_name in show_layers:
+                    colors = full_color_map[layer_name]
+                    fig.add_trace(go.Scatter3d(
+                        x=[None], y=[None], z=[None],
+                        mode='markers',
+                        marker=dict(size=10, color=colors['base']),
+                        name=layer_name,
+                        showlegend=True
                     ))
 
                 fig.update_layout(
                     scene=dict(
-                        xaxis_title='X (m)',
-                        yaxis_title='Y (m)',
-                        zaxis_title='Z (m)',
-                        aspectmode='data'
+                        xaxis=dict(
+                            title='X (m)',
+                            backgroundcolor='rgb(240, 240, 240)',
+                            gridcolor='white',
+                            showbackground=True,
+                            zerolinecolor='gray'
+                        ),
+                        yaxis=dict(
+                            title='Y (m)',
+                            backgroundcolor='rgb(240, 240, 240)',
+                            gridcolor='white',
+                            showbackground=True,
+                            zerolinecolor='gray'
+                        ),
+                        zaxis=dict(
+                            title='Z 高程 (m)',
+                            backgroundcolor='rgb(230, 230, 230)',
+                            gridcolor='white',
+                            showbackground=True,
+                            zerolinecolor='gray'
+                        ),
+                        aspectmode='data',
+                        camera=dict(
+                            eye=dict(x=1.5, y=1.5, z=1.0),
+                            up=dict(x=0, y=0, z=1)
+                        )
                     ),
-                    height=700,
-                    margin=dict(l=0, r=0, t=30, b=0)
+                    height=750,
+                    margin=dict(l=0, r=0, t=30, b=0),
+                    legend=dict(
+                        yanchor="top",
+                        y=0.99,
+                        xanchor="left",
+                        x=0.01,
+                        bgcolor='rgba(255,255,255,0.8)',
+                        bordercolor='black',
+                        borderwidth=1
+                    )
                 )
 
                 st.plotly_chart(fig, use_container_width=True)
+
+                # 显示颜色图例说明
+                st.markdown("---")
+                st.subheader("岩层颜色图例")
+                legend_cols = st.columns(min(len(show_layers), 4))
+                for i, layer_name in enumerate(show_layers):
+                    with legend_cols[i % len(legend_cols)]:
+                        colors = full_color_map[layer_name]
+                        st.markdown(f'''
+                        <div style="display:flex; align-items:center; margin:5px 0;">
+                            <div style="width:30px; height:20px; background:{colors['base']};
+                                        border:1px solid black; margin-right:8px;"></div>
+                            <span><b>{layer_name}</b></span>
+                        </div>
+                        ''', unsafe_allow_html=True)
+
+                # ==================== PyVista 高级渲染 ====================
+                st.markdown("---")
+                st.subheader("PyVista 高级渲染")
+
+                if PYVISTA_AVAILABLE:
+                    st.info("PyVista 已启用，支持 PBR 材质、纹理贴图和多种导出格式")
+
+                    pv_col1, pv_col2 = st.columns(2)
+
+                    with pv_col1:
+                        pv_use_textures = st.checkbox("启用程序化纹理", value=True,
+                                                       help="为不同岩石类型生成专业纹理")
+                        pv_use_pbr = st.checkbox("启用 PBR 渲染", value=True,
+                                                  help="物理渲染，更真实的材质效果")
+                        pv_add_sides = st.checkbox("渲染侧面", value=True,
+                                                    help="显示地层的侧面轮廓")
+
+                    with pv_col2:
+                        pv_export_format = st.multiselect(
+                            "导出格式",
+                            ['PNG (高清截图)', 'HTML (交互式)', 'OBJ (3D模型)', 'STL (3D打印)'],
+                            default=['PNG (高清截图)', 'HTML (交互式)']
+                        )
+                        pv_opacity = st.slider("PyVista 透明度", 0.5, 1.0, 0.95)
+
+                    if st.button("🎨 PyVista 渲染导出", type="primary"):
+                        with st.spinner("正在使用 PyVista 渲染..."):
+                            try:
+                                # 创建输出目录
+                                output_dir = os.path.join(project_root, 'output', 'pyvista')
+                                os.makedirs(output_dir, exist_ok=True)
+
+                                # 创建渲染器
+                                renderer = GeologicalModelRenderer(
+                                    background='white',
+                                    window_size=(1920, 1080),
+                                    use_pbr=pv_use_pbr
+                                )
+
+                                # 渲染模型
+                                plotter = renderer.render_model(
+                                    block_models,
+                                    XI, YI,
+                                    show_layers=show_layers,
+                                    add_sides=pv_add_sides,
+                                    use_textures=pv_use_textures,
+                                    opacity=pv_opacity,
+                                    show_edges=False,
+                                    lighting='three_lights'
+                                )
+
+                                # 添加钻孔标记
+                                if 'borehole_coords' in result and 'borehole_ids' in result:
+                                    renderer.add_borehole_markers(
+                                        result['borehole_coords'],
+                                        result['borehole_ids']
+                                    )
+
+                                exported_files = []
+
+                                # 导出文件
+                                if 'PNG (高清截图)' in pv_export_format:
+                                    png_path = os.path.join(output_dir, 'geological_model.png')
+                                    renderer.export_screenshot(png_path, scale=2)
+                                    exported_files.append(png_path)
+
+                                if 'HTML (交互式)' in pv_export_format:
+                                    html_path = os.path.join(output_dir, 'geological_model.html')
+                                    renderer.export_html(html_path)
+                                    exported_files.append(html_path)
+
+                                if 'OBJ (3D模型)' in pv_export_format:
+                                    obj_path = os.path.join(output_dir, 'geological_model.obj')
+                                    renderer.export_mesh(obj_path, file_format='obj')
+                                    exported_files.append(obj_path)
+
+                                if 'STL (3D打印)' in pv_export_format:
+                                    stl_path = os.path.join(output_dir, 'geological_model.stl')
+                                    renderer.export_mesh(stl_path, file_format='stl')
+                                    exported_files.append(stl_path)
+
+                                st.success(f"✅ PyVista 渲染完成!")
+
+                                # 显示导出文件列表
+                                st.write("**导出文件：**")
+                                for f in exported_files:
+                                    st.write(f"- `{f}`")
+
+                                # 显示 PNG 预览
+                                png_path = os.path.join(output_dir, 'geological_model.png')
+                                if os.path.exists(png_path):
+                                    st.image(png_path, caption="PyVista 渲染结果", use_container_width=True)
+
+                                # 提供 HTML 下载链接
+                                html_path = os.path.join(output_dir, 'geological_model.html')
+                                if os.path.exists(html_path):
+                                    with open(html_path, 'r', encoding='utf-8') as f:
+                                        html_content = f.read()
+                                    st.download_button(
+                                        label="📥 下载交互式 HTML",
+                                        data=html_content,
+                                        file_name="geological_model.html",
+                                        mime="text/html"
+                                    )
+
+                            except Exception as e:
+                                st.error(f"❌ PyVista 渲染失败: {str(e)}")
+                                import traceback
+                                st.code(traceback.format_exc())
+
+                    # 提供独立脚本说明
+                    with st.expander("使用独立 PyVista 脚本（交互式窗口）"):
+                        st.markdown("""
+                        如果需要交互式 3D 窗口，可以运行以下脚本：
+
+                        ```python
+                        # render_pyvista.py
+                        from src.pyvista_renderer import render_geological_model
+                        import numpy as np
+
+                        # 加载你的模型数据
+                        # block_models, XI, YI = ...
+
+                        # 渲染（会打开交互窗口）
+                        renderer = render_geological_model(
+                            block_models, XI, YI,
+                            show_interactive=True,
+                            use_textures=True,
+                            add_sides=True,
+                            export_formats=['png', 'html', 'obj']
+                        )
+                        ```
+
+                        **交互操作：**
+                        - 左键拖动：旋转
+                        - 右键拖动：平移
+                        - 滚轮：缩放
+                        - `r` 键：重置视角
+                        - `q` 键：退出
+                        """)
+
+                else:
+                    st.warning("⚠️ PyVista 未安装。请运行 `pip install pyvista` 安装后重启应用。")
+                    st.code("pip install pyvista pyvistaqt", language="bash")
 
     # ==================== Tab 4: 结果分析 ====================
     with tab4:

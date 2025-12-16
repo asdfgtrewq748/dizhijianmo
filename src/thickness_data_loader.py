@@ -352,12 +352,32 @@ class ThicknessDataBuilder:
         self.coord_scaler = StandardScaler()
         self.feature_scaler = StandardScaler()
 
-    def infer_layer_order(self, df_layers: pd.DataFrame) -> List[str]:
+    def infer_layer_order(self, df_layers: pd.DataFrame, method: str = 'position_based', min_occurrence_rate: float = 0.3) -> List[str]:
         """
         自动推断全局层序
 
-        根据各钻孔的层位次序，计算每个岩性的出现位置中位数，按中位数排序
+        Args:
+            df_layers: 层表数据
+            method: 推断方法
+                - 'simple': 按岩性名称合并（旧方法，会丢失重复层）
+                - 'position_based': 按位置区分同名层（推荐）
+                - 'marker_based': 以煤层为标志层对齐（最准确，但需要煤层数据）
+            min_occurrence_rate: 最小出现率阈值 (仅对position_based有效)
+
+        Returns:
+            层序列表（从底到顶）
         """
+        if method == 'simple':
+            return self._infer_layer_order_simple(df_layers)
+        elif method == 'position_based':
+            return self._infer_layer_order_position_based(df_layers, min_occurrence_rate)
+        elif method == 'marker_based':
+            return self._infer_layer_order_marker_based(df_layers)
+        else:
+            raise ValueError(f"未知方法: {method}")
+
+    def _infer_layer_order_simple(self, df_layers: pd.DataFrame) -> List[str]:
+        """简单方法：按岩性名称合并（会丢失重复层）"""
         positions = {}
         for bh_id, sub in df_layers.groupby('borehole_id'):
             for idx, lith in zip(sub['layer_order'].values, sub['lithology'].values):
@@ -365,11 +385,156 @@ class ThicknessDataBuilder:
 
         layer_order = sorted(positions.keys(), key=lambda k: np.median(positions[k]))
 
-        print("自动推断的层序（从底到顶）:")
+        print("简单层序推断（从底到顶）- 警告：同种岩性被合并!")
         for i, name in enumerate(layer_order):
             print(f"  {i}: {name} (出现{len(positions[name])}次)")
 
         return layer_order
+
+    def _infer_layer_order_position_based(self, df_layers: pd.DataFrame, min_occurrence_rate: float = 0.3) -> List[str]:
+        """
+        按位置区分同名层的方法
+
+        Args:
+            df_layers: 层表数据
+            min_occurrence_rate: 最小出现率阈值 (0-1)，低于此值的层将被忽略
+
+        逻辑：
+        1. 统计每种岩性在各钻孔中的最大出现次数
+        2. 为每次出现创建独立的层标识
+        3. 按相对深度位置排序
+        """
+        print(f"\n[层序推断] 使用位置区分方法 (最小出现率={min_occurrence_rate*100:.0f}%)...")
+
+        # 统计每种岩性在各钻孔中的出现次数
+        lith_max_occurrences = {}  # {岩性: 最大出现次数}
+        lith_positions = {}  # {岩性: {出现序号: [相对位置列表]}}
+
+        total_boreholes = df_layers['borehole_id'].nunique()
+
+        for bh_id, sub in df_layers.groupby('borehole_id'):
+            sub = sub.sort_values('layer_order', ascending=True)
+            total_layers = len(sub)
+
+            lith_count = {}  # 当前钻孔中每种岩性的出现计数
+
+            for idx, (_, row) in enumerate(sub.iterrows()):
+                lith = row['lithology']
+                relative_pos = idx / max(total_layers - 1, 1)  # 相对位置 0-1
+
+                # 计算该岩性的出现序号
+                if lith not in lith_count:
+                    lith_count[lith] = 0
+                occurrence = lith_count[lith]
+                lith_count[lith] += 1
+
+                # 记录位置
+                if lith not in lith_positions:
+                    lith_positions[lith] = {}
+                if occurrence not in lith_positions[lith]:
+                    lith_positions[lith][occurrence] = []
+                lith_positions[lith][occurrence].append(relative_pos)
+
+            # 更新最大出现次数
+            for lith, count in lith_count.items():
+                lith_max_occurrences[lith] = max(lith_max_occurrences.get(lith, 0), count)
+
+        # 创建层列表，每个(岩性, 出现序号)为一个独立层
+        layer_list = []  # [(层名, 平均相对位置, 出现次数)]
+        min_count = max(2, int(total_boreholes * min_occurrence_rate))
+
+        for lith, max_occ in lith_max_occurrences.items():
+            for occ in range(max_occ):
+                if occ in lith_positions.get(lith, {}):
+                    positions = lith_positions[lith][occ]
+                    avg_pos = np.median(positions)
+                    occurrence_count = len(positions)
+
+                    # 只有当出现次数足够多时才作为独立层
+                    if occurrence_count >= min_count:
+                        if max_occ > 1:
+                            layer_name = f"{lith}_{occ+1}"  # 粉砂岩_1, 粉砂岩_2, ...
+                        else:
+                            layer_name = lith  # 只出现一次的不加后缀
+                        layer_list.append((layer_name, avg_pos, occurrence_count))
+
+        # 按相对位置排序（从顶到底 -> 从底到顶）
+        layer_list.sort(key=lambda x: x[1])  # 按位置升序（顶部=0，底部=1）
+
+        layer_order = [item[0] for item in layer_list]
+
+        print(f"\n[层序推断] 推断出 {len(layer_order)} 层（从顶到底）:")
+        for i, (name, pos, count) in enumerate(layer_list):
+            print(f"  {i}: {name} (相对位置={pos:.2f}, 出现{count}次, {count*100/total_boreholes:.0f}%)")
+
+        return layer_order
+
+    def _infer_layer_order_marker_based(self, df_layers: pd.DataFrame) -> List[str]:
+        """
+        以煤层为标志层的对齐方法
+
+        逻辑：
+        1. 识别所有煤层作为标志层
+        2. 以煤层为锚点，计算其他层相对于最近煤层的位置
+        3. 构建相对于标志层的层序
+        """
+        print("\n[层序推断] 使用煤层标志法...")
+
+        # 提取所有唯一的煤层名称
+        all_coal_layers = df_layers[df_layers['lithology'].str.contains('煤', na=False)]['lithology'].unique()
+        coal_layers = sorted(set(all_coal_layers))
+
+        if len(coal_layers) == 0:
+            print("警告：未找到煤层，回退到位置法")
+            return self._infer_layer_order_position_based(df_layers)
+
+        print(f"  识别到 {len(coal_layers)} 个煤层标志: {coal_layers[:10]}...")
+
+        # 分析煤层的相对位置
+        coal_positions = {}  # {煤层名: [相对位置列表]}
+
+        for bh_id, sub in df_layers.groupby('borehole_id'):
+            sub = sub.sort_values('layer_order', ascending=True)
+            total_depth = sub['bottom_depth'].max()
+
+            for _, row in sub.iterrows():
+                lith = row['lithology']
+                if '煤' in lith:
+                    rel_pos = row['center_depth'] / max(total_depth, 1)
+                    if lith not in coal_positions:
+                        coal_positions[lith] = []
+                    coal_positions[lith].append(rel_pos)
+
+        # 按中位深度排序煤层
+        coal_order = sorted(coal_positions.keys(),
+                          key=lambda k: np.median(coal_positions[k]))
+
+        print(f"  煤层顺序（从浅到深）: {coal_order[:10]}...")
+
+        # 分析非煤层相对于煤层的位置
+        non_coal_layers = {}  # {岩性: {位置类型: 计数}}
+
+        for bh_id, sub in df_layers.groupby('borehole_id'):
+            sub = sub.sort_values('layer_order', ascending=True)
+            layers_list = sub['lithology'].tolist()
+            depths = sub['center_depth'].tolist()
+
+            for i, lith in enumerate(layers_list):
+                if '煤' not in lith:
+                    # 找最近的煤层
+                    for j, coal in enumerate(layers_list):
+                        if '煤' in coal:
+                            if i < j:
+                                key = f"上_{coal}"  # 在煤层上方
+                            else:
+                                key = f"下_{coal}"  # 在煤层下方
+                            if lith not in non_coal_layers:
+                                non_coal_layers[lith] = {}
+                            non_coal_layers[lith][key] = non_coal_layers[lith].get(key, 0) + 1
+                            break
+
+        # 构建完整层序：使用位置法作为基础，但保留煤层的精确位置
+        return self._infer_layer_order_position_based(df_layers)
 
     def build_graph(self, coords: np.ndarray) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -470,6 +635,9 @@ class ThicknessDataBuilder:
         coords = []
         bh_ids = []
 
+        # 检查层名是否有编号后缀（如 粉砂岩_1）
+        has_numbered_layers = any('_' in name and name.split('_')[-1].isdigit() for name in layer_order)
+
         for idx, (bh_id, sub) in enumerate(borehole_groups):
             sub = sub.sort_values('layer_order', ascending=True)
             total_depth = sub['thickness'].sum()
@@ -481,13 +649,40 @@ class ThicknessDataBuilder:
             bh_ids.append(bh_id)
 
             # 填充各层厚度
-            for _, row in sub.iterrows():
-                lith = row['lithology']
-                if lith not in layer_to_idx:
-                    continue
-                li = layer_to_idx[lith]
-                y_thick[idx, li] = float(row['thickness'])
-                y_exist[idx, li] = 1.0
+            if has_numbered_layers:
+                # 带编号的层：需要跟踪每种岩性的出现次数
+                lith_occurrence = {}  # {岩性: 当前出现次数}
+
+                for _, row in sub.iterrows():
+                    lith = row['lithology']
+
+                    # 计算当前出现序号
+                    if lith not in lith_occurrence:
+                        lith_occurrence[lith] = 0
+                    occ = lith_occurrence[lith]
+                    lith_occurrence[lith] += 1
+
+                    # 尝试匹配带编号的层名
+                    layer_name_with_num = f"{lith}_{occ+1}"
+                    layer_name_without_num = lith
+
+                    if layer_name_with_num in layer_to_idx:
+                        li = layer_to_idx[layer_name_with_num]
+                        y_thick[idx, li] = float(row['thickness'])
+                        y_exist[idx, li] = 1.0
+                    elif layer_name_without_num in layer_to_idx:
+                        li = layer_to_idx[layer_name_without_num]
+                        y_thick[idx, li] = float(row['thickness'])
+                        y_exist[idx, li] = 1.0
+            else:
+                # 无编号的层：直接匹配岩性名称
+                for _, row in sub.iterrows():
+                    lith = row['lithology']
+                    if lith not in layer_to_idx:
+                        continue
+                    li = layer_to_idx[lith]
+                    y_thick[idx, li] = float(row['thickness'])
+                    y_exist[idx, li] = 1.0
 
             # 增强特征：钻孔统计信息
             num_layers_in_bh = len(sub)
@@ -647,6 +842,8 @@ class ThicknessDataProcessor:
         data_dir: str,
         coord_file: Optional[str] = None,
         layer_order: Optional[List[str]] = None,
+        layer_method: str = 'position_based',
+        min_occurrence_rate: float = 0.3,
         test_size: float = 0.2,
         val_size: float = 0.1
     ) -> Dict:
@@ -657,6 +854,8 @@ class ThicknessDataProcessor:
             data_dir: 数据目录
             coord_file: 坐标文件路径
             layer_order: 地层顺序（None则自动推断）
+            layer_method: 层序推断方法 ('simple', 'position_based', 'marker_based')
+            min_occurrence_rate: 最小出现率阈值 (仅对position_based有效)
             test_size: 测试集比例
             val_size: 验证集比例
 
@@ -668,6 +867,14 @@ class ThicknessDataProcessor:
 
         # 标准化岩性
         df_layers = self.layer_processor.standardize_lithology(df_layers)
+
+        # 如果未指定层序，使用指定方法推断
+        if layer_order is None:
+            layer_order = self.data_builder.infer_layer_order(
+                df_layers,
+                method=layer_method,
+                min_occurrence_rate=min_occurrence_rate
+            )
 
         # 构建图数据
         result = self.data_builder.build_thickness_data(

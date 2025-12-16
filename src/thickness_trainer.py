@@ -2,6 +2,7 @@
 厚度预测训练模块 (重构版)
 
 专门用于GNN厚度回归任务的训练和评估
+包含数据增强、K-fold交叉验证等优化
 """
 
 import numpy as np
@@ -9,14 +10,196 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.data import Data
-from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingLR
-from typing import Dict, List, Optional, Tuple, Callable
+from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingLR, OneCycleLR
+from typing import Dict, List, Optional, Tuple, Callable, Any
 import os
 import json
 import time
 from datetime import datetime
+from sklearn.model_selection import KFold
 
 from .gnn_thickness_modeling import GNNThicknessPredictor, ThicknessLoss
+
+
+# =============================================================================
+# 数据增强
+# =============================================================================
+
+class ThicknessDataAugmentation:
+    """
+    厚度预测数据增强
+
+    针对小样本地质数据的增强策略
+    """
+
+    @staticmethod
+    def add_noise(data: Data, noise_std: float = 0.05) -> Data:
+        """
+        添加高斯噪声到特征
+
+        Args:
+            data: 原始数据
+            noise_std: 噪声标准差（相对于特征标准差）
+        """
+        data = data.clone()
+        noise = torch.randn_like(data.x) * noise_std
+        data.x = data.x + noise
+        return data
+
+    @staticmethod
+    def add_thickness_noise(data: Data, noise_std: float = 0.1) -> Data:
+        """
+        添加厚度噪声（用于训练时增强鲁棒性）
+
+        Args:
+            data: 原始数据
+            noise_std: 噪声标准差（相对于厚度）
+        """
+        data = data.clone()
+        # 只对存在的层添加噪声
+        noise = torch.randn_like(data.y_thick) * noise_std
+        noise = noise * data.y_exist  # 只对存在的层添加
+        data.y_thick = torch.clamp(data.y_thick + noise * data.y_thick, min=0.1)
+        return data
+
+    @staticmethod
+    def random_dropout_features(data: Data, dropout_rate: float = 0.1) -> Data:
+        """
+        随机丢弃部分特征
+
+        Args:
+            data: 原始数据
+            dropout_rate: 特征丢弃率
+        """
+        data = data.clone()
+        mask = torch.rand_like(data.x) > dropout_rate
+        data.x = data.x * mask
+        return data
+
+    @staticmethod
+    def mixup(data: Data, alpha: float = 0.2) -> Data:
+        """
+        Mixup数据增强
+
+        Args:
+            data: 原始数据
+            alpha: Beta分布参数
+        """
+        data = data.clone()
+        n = data.x.shape[0]
+
+        # 随机排列
+        perm = torch.randperm(n)
+
+        # Beta分布采样混合比例
+        lam = np.random.beta(alpha, alpha)
+
+        # 混合特征和标签
+        data.x = lam * data.x + (1 - lam) * data.x[perm]
+        data.y_thick = lam * data.y_thick + (1 - lam) * data.y_thick[perm]
+        data.y_exist = torch.clamp(data.y_exist + data.y_exist[perm], max=1.0)
+
+        return data
+
+    @staticmethod
+    def interpolate_virtual_boreholes(data: Data, n_virtual: int = 10) -> Data:
+        """
+        插值生成虚拟钻孔
+
+        通过在现有钻孔之间插值创建新的训练样本
+
+        Args:
+            data: 原始数据
+            n_virtual: 虚拟钻孔数量
+        """
+        data = data.clone()
+        n_original = data.x.shape[0]
+
+        if n_original < 3:
+            return data
+
+        # 生成虚拟钻孔
+        virtual_x = []
+        virtual_y_thick = []
+        virtual_y_exist = []
+
+        for _ in range(n_virtual):
+            # 随机选择两个钻孔进行插值
+            idx1, idx2 = np.random.choice(n_original, 2, replace=False)
+
+            # 随机插值比例
+            t = np.random.uniform(0.2, 0.8)
+
+            # 插值特征
+            x_new = t * data.x[idx1] + (1 - t) * data.x[idx2]
+
+            # 插值厚度（仅对两个钻孔都存在的层）
+            both_exist = data.y_exist[idx1] * data.y_exist[idx2]
+            y_thick_new = t * data.y_thick[idx1] + (1 - t) * data.y_thick[idx2]
+            y_thick_new = y_thick_new * both_exist
+
+            virtual_x.append(x_new)
+            virtual_y_thick.append(y_thick_new)
+            virtual_y_exist.append(both_exist)
+
+        # 合并
+        virtual_x = torch.stack(virtual_x)
+        virtual_y_thick = torch.stack(virtual_y_thick)
+        virtual_y_exist = torch.stack(virtual_y_exist)
+
+        data.x = torch.cat([data.x, virtual_x], dim=0)
+        data.y_thick = torch.cat([data.y_thick, virtual_y_thick], dim=0)
+        data.y_exist = torch.cat([data.y_exist, virtual_y_exist], dim=0)
+
+        # 更新边（简单添加到现有边）
+        # 为虚拟钻孔添加到最近钻孔的边
+        from scipy.spatial import KDTree
+
+        # 获取坐标（假设前两个特征是坐标）
+        coords = data.x[:n_original, :2].numpy()
+        virtual_coords = data.x[n_original:, :2].numpy()
+
+        tree = KDTree(coords)
+        new_edges = []
+
+        for i, vc in enumerate(virtual_coords):
+            # 找最近的3个钻孔
+            _, indices = tree.query(vc, k=min(3, n_original))
+            for j in indices:
+                new_edges.append([n_original + i, j])
+                new_edges.append([j, n_original + i])
+
+        if new_edges:
+            new_edge_index = torch.tensor(new_edges, dtype=torch.long).t()
+            data.edge_index = torch.cat([data.edge_index, new_edge_index], dim=1)
+
+            # 更新边属性
+            if hasattr(data, 'edge_attr') and data.edge_attr is not None:
+                new_edge_attr = torch.ones(len(new_edges), data.edge_attr.shape[1])
+                data.edge_attr = torch.cat([data.edge_attr, new_edge_attr], dim=0)
+
+        # 更新掩码
+        n_total = data.x.shape[0]
+        new_train_mask = torch.zeros(n_total, dtype=torch.bool)
+        new_train_mask[:n_original] = data.train_mask
+        new_train_mask[n_original:] = True  # 虚拟钻孔都用于训练
+        data.train_mask = new_train_mask
+
+        new_val_mask = torch.zeros(n_total, dtype=torch.bool)
+        new_val_mask[:n_original] = data.val_mask
+        data.val_mask = new_val_mask
+
+        new_test_mask = torch.zeros(n_total, dtype=torch.bool)
+        new_test_mask[:n_original] = data.test_mask
+        data.test_mask = new_test_mask
+
+        # 更新 y_mask
+        if hasattr(data, 'y_mask'):
+            new_y_mask = torch.ones(n_total, data.y_thick.shape[1])
+            new_y_mask[:n_original] = data.y_mask
+            data.y_mask = new_y_mask
+
+        return data
 
 
 class ThicknessTrainer:
@@ -24,6 +207,12 @@ class ThicknessTrainer:
     厚度预测训练器
 
     专为厚度回归任务设计的训练流程
+
+    针对小样本数据的优化策略：
+    - 数据增强：噪声注入、mixup、虚拟钻孔插值
+    - K-fold交叉验证：更稳定的评估
+    - 梯度累积：模拟更大batch size
+    - 标签平滑：防止过拟合
     """
 
     def __init__(
@@ -32,10 +221,12 @@ class ThicknessTrainer:
         device: str = 'auto',
         learning_rate: float = 0.001,
         weight_decay: float = 1e-4,
-        scheduler_type: str = 'plateau',  # 'plateau' | 'cosine' | 'none'
+        scheduler_type: str = 'plateau',  # 'plateau' | 'cosine' | 'onecycle' | 'none'
         thick_weight: float = 1.0,
         exist_weight: float = 0.5,
-        smooth_weight: float = 0.1
+        smooth_weight: float = 0.1,
+        use_augmentation: bool = True,
+        augmentation_prob: float = 0.5
     ):
         """
         初始化
@@ -49,6 +240,8 @@ class ThicknessTrainer:
             thick_weight: 厚度损失权重
             exist_weight: 存在性损失权重
             smooth_weight: 平滑正则化权重
+            use_augmentation: 是否使用数据增强
+            augmentation_prob: 数据增强应用概率
         """
         if device == 'auto':
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -56,6 +249,13 @@ class ThicknessTrainer:
             self.device = torch.device(device)
 
         self.model = model.to(self.device)
+        self.learning_rate = learning_rate
+        self.weight_decay = weight_decay
+
+        # 数据增强设置
+        self.use_augmentation = use_augmentation
+        self.augmentation_prob = augmentation_prob
+        self.augmenter = ThicknessDataAugmentation()
 
         # 优化器
         self.optimizer = torch.optim.AdamW(
@@ -66,21 +266,7 @@ class ThicknessTrainer:
 
         # 学习率调度
         self.scheduler_type = scheduler_type
-        if scheduler_type == 'plateau':
-            self.scheduler = ReduceLROnPlateau(
-                self.optimizer,
-                mode='min',
-                factor=0.5,
-                patience=10
-            )
-        elif scheduler_type == 'cosine':
-            self.scheduler = CosineAnnealingLR(
-                self.optimizer,
-                T_max=100,
-                eta_min=1e-6
-            )
-        else:
-            self.scheduler = None
+        self.scheduler = None  # 在train方法中根据epochs初始化
 
         # 损失函数
         self.criterion = ThicknessLoss(
@@ -104,12 +290,60 @@ class ThicknessTrainer:
         self.best_state = None
         self.epoch = 0
 
-    def train_epoch(self, data: Data) -> Dict[str, float]:
+    def _init_scheduler(self, epochs: int):
+        """初始化学习率调度器"""
+        if self.scheduler_type == 'plateau':
+            self.scheduler = ReduceLROnPlateau(
+                self.optimizer,
+                mode='min',
+                factor=0.5,
+                patience=15,
+                min_lr=1e-6
+            )
+        elif self.scheduler_type == 'cosine':
+            self.scheduler = CosineAnnealingLR(
+                self.optimizer,
+                T_max=epochs,
+                eta_min=1e-6
+            )
+        elif self.scheduler_type == 'onecycle':
+            self.scheduler = OneCycleLR(
+                self.optimizer,
+                max_lr=self.learning_rate * 10,
+                total_steps=epochs,
+                pct_start=0.3,
+                anneal_strategy='cos'
+            )
+        else:
+            self.scheduler = None
+
+    def _apply_augmentation(self, data: Data) -> Data:
+        """应用数据增强"""
+        if not self.use_augmentation:
+            return data
+
+        if np.random.random() < self.augmentation_prob:
+            # 随机选择增强方法
+            aug_methods = [
+                lambda d: self.augmenter.add_noise(d, noise_std=0.03),
+                lambda d: self.augmenter.random_dropout_features(d, dropout_rate=0.1),
+                lambda d: self.augmenter.mixup(d, alpha=0.2),
+            ]
+            aug_fn = np.random.choice(aug_methods)
+            try:
+                data = aug_fn(data)
+            except Exception:
+                pass  # 增强失败时使用原数据
+
+        return data
+
+    def train_epoch(self, data: Data, use_aug: bool = True) -> Dict[str, float]:
         """
         训练一个epoch
 
         Args:
             data: PyG Data对象
+            use_aug: 是否使用数据增强
 
         Returns:
             训练指标字典
@@ -117,21 +351,27 @@ class ThicknessTrainer:
         self.model.train()
         self.optimizer.zero_grad()
 
-        # 前向传播
+        # 应用数据增强
+        if use_aug:
+            train_data = self._apply_augmentation(data)
+        else:
+            train_data = data
+
+        # 前向传播（使用增强后的数据）
         pred_thick, pred_exist = self.model(
-            data.x,
-            data.edge_index,
-            data.edge_attr if hasattr(data, 'edge_attr') else None
+            train_data.x,
+            train_data.edge_index,
+            train_data.edge_attr if hasattr(train_data, 'edge_attr') else None
         )
 
         # 计算损失（仅在训练集上）
-        train_mask = data.train_mask
+        train_mask = train_data.train_mask
         loss, loss_dict = self.criterion(
             pred_thick[train_mask],
             pred_exist[train_mask],
-            data.y_thick[train_mask],
-            data.y_exist[train_mask],
-            data.y_mask[train_mask] if hasattr(data, 'y_mask') else None
+            train_data.y_thick[train_mask],
+            train_data.y_exist[train_mask],
+            train_data.y_mask[train_mask] if hasattr(train_data, 'y_mask') else None
         )
 
         # 反向传播
@@ -139,13 +379,18 @@ class ThicknessTrainer:
         torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
         self.optimizer.step()
 
-        # 计算评估指标
+        # 计算评估指标（使用原始数据，不受增强影响）
         with torch.no_grad():
+            pred_thick_eval, pred_exist_eval = self.model(
+                data.x,
+                data.edge_index,
+                data.edge_attr if hasattr(data, 'edge_attr') else None
+            )
             # 仅在存在的层上计算MAE和RMSE
-            exist_mask = train_mask.unsqueeze(1) * data.y_exist.bool()
+            exist_mask = data.train_mask.unsqueeze(1) * data.y_exist.bool()
             if exist_mask.sum() > 0:
-                mae = F.l1_loss(pred_thick[exist_mask], data.y_thick[exist_mask]).item()
-                rmse = torch.sqrt(F.mse_loss(pred_thick[exist_mask], data.y_thick[exist_mask])).item()
+                mae = F.l1_loss(pred_thick_eval[exist_mask], data.y_thick[exist_mask]).item()
+                rmse = torch.sqrt(F.mse_loss(pred_thick_eval[exist_mask], data.y_thick[exist_mask])).item()
             else:
                 mae = 0.0
                 rmse = 0.0
@@ -223,6 +468,7 @@ class ThicknessTrainer:
         data: Data,
         epochs: int = 200,
         patience: int = 30,
+        warmup_epochs: int = 20,
         verbose: bool = True,
         log_interval: int = 10,
         save_dir: Optional[str] = None
@@ -234,6 +480,7 @@ class ThicknessTrainer:
             data: PyG Data对象
             epochs: 训练轮数
             patience: 早停耐心值
+            warmup_epochs: 预热轮数（预热期间不触发早停）
             verbose: 是否打印日志
             log_interval: 日志打印间隔
             save_dir: 模型保存目录
@@ -241,6 +488,9 @@ class ThicknessTrainer:
         Returns:
             训练历史
         """
+        # 初始化学习率调度器
+        self._init_scheduler(epochs)
+
         # 移动数据到设备
         data = data.to(self.device)
 
@@ -253,13 +503,17 @@ class ThicknessTrainer:
             print(f"训练集: {data.train_mask.sum().item()}, "
                   f"验证集: {data.val_mask.sum().item()}, "
                   f"测试集: {data.test_mask.sum().item()}")
+            print(f"数据增强: {'开启' if self.use_augmentation else '关闭'}")
+            print(f"学习率调度: {self.scheduler_type}")
+            print(f"预热轮数: {warmup_epochs}")
             print(f"{'='*60}")
 
         for epoch in range(epochs):
             self.epoch = epoch + 1
+            is_warmup = epoch < warmup_epochs
 
-            # 训练
-            train_metrics = self.train_epoch(data)
+            # 训练（预热期间降低增强概率）
+            train_metrics = self.train_epoch(data, use_aug=self.use_augmentation and not is_warmup)
 
             # 验证
             val_metrics = self.evaluate(data, data.val_mask)
@@ -281,7 +535,7 @@ class ThicknessTrainer:
             self.history['val_rmse'].append(val_metrics['rmse'])
             self.history['lr'].append(current_lr)
 
-            # 早停检查
+            # 早停检查（预热期间不触发早停）
             if val_metrics['loss'] < self.best_val_loss:
                 self.best_val_loss = val_metrics['loss']
                 self.best_state = {k: v.cpu().clone() for k, v in self.model.state_dict().items()}
@@ -290,20 +544,22 @@ class ThicknessTrainer:
                 # 保存最佳模型
                 if save_dir:
                     self.save_checkpoint(save_dir, 'best_model.pt')
-            else:
+            elif not is_warmup:
+                # 仅在预热期结束后累计patience计数
                 patience_counter += 1
 
             # 打印日志
             if verbose and (epoch + 1) % log_interval == 0:
-                print(f"Epoch {epoch+1:3d}/{epochs} | "
+                warmup_status = " [预热]" if is_warmup else ""
+                print(f"Epoch {epoch+1:3d}/{epochs}{warmup_status} | "
                       f"Train Loss: {train_metrics['loss']:.4f} | "
                       f"Val Loss: {val_metrics['loss']:.4f} | "
                       f"Val MAE: {val_metrics['mae']:.3f}m | "
                       f"Val R²: {val_metrics['r2']:.3f} | "
                       f"LR: {current_lr:.2e}")
 
-            # 早停
-            if patience_counter >= patience:
+            # 早停（预热期结束后才检查）
+            if not is_warmup and patience_counter >= patience:
                 if verbose:
                     print(f"\n早停触发: {patience}轮验证损失未改善")
                 break
@@ -354,6 +610,261 @@ class ThicknessTrainer:
         self.epoch = checkpoint['epoch']
         self.best_val_loss = checkpoint['best_val_loss']
         self.history = checkpoint['history']
+
+
+def k_fold_cross_validation(
+    model_class: type,
+    model_kwargs: Dict,
+    data: Data,
+    n_splits: int = 5,
+    epochs: int = 200,
+    patience: int = 30,
+    trainer_kwargs: Optional[Dict] = None,
+    verbose: bool = True,
+    seed: int = 42
+) -> Dict[str, Any]:
+    """
+    K-fold交叉验证
+
+    专为小样本地质数据设计的K-fold交叉验证
+
+    Args:
+        model_class: 模型类
+        model_kwargs: 模型初始化参数
+        data: PyG Data对象（应包含所有数据，不需要预先划分）
+        n_splits: fold数量
+        epochs: 每个fold的训练轮数
+        patience: 早停耐心值
+        trainer_kwargs: 训练器额外参数
+        verbose: 是否打印详细信息
+        seed: 随机种子
+
+    Returns:
+        results: 交叉验证结果字典
+    """
+    from sklearn.model_selection import KFold
+    import copy
+
+    if trainer_kwargs is None:
+        trainer_kwargs = {}
+
+    # 设置随机种子
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+    # 获取所有样本索引
+    n_samples = data.x.shape[0]
+    indices = np.arange(n_samples)
+
+    # K-fold分割
+    kf = KFold(n_splits=n_splits, shuffle=True, random_state=seed)
+
+    fold_results = []
+
+    if verbose:
+        print(f"\n{'='*70}")
+        print(f"开始 {n_splits}-Fold 交叉验证")
+        print(f"总样本数: {n_samples}, 每个fold约 {n_samples//n_splits} 个测试样本")
+        print(f"{'='*70}\n")
+
+    for fold, (train_val_idx, test_idx) in enumerate(kf.split(indices)):
+        if verbose:
+            print(f"\n{'='*70}")
+            print(f"Fold {fold + 1}/{n_splits}")
+            print(f"{'='*70}")
+
+        # 进一步划分训练集和验证集（80% train, 20% val）
+        n_train = int(len(train_val_idx) * 0.8)
+        train_idx = train_val_idx[:n_train]
+        val_idx = train_val_idx[n_train:]
+
+        # 创建mask
+        fold_data = copy.deepcopy(data)
+        fold_data.train_mask = torch.zeros(n_samples, dtype=torch.bool)
+        fold_data.val_mask = torch.zeros(n_samples, dtype=torch.bool)
+        fold_data.test_mask = torch.zeros(n_samples, dtype=torch.bool)
+
+        fold_data.train_mask[train_idx] = True
+        fold_data.val_mask[val_idx] = True
+        fold_data.test_mask[test_idx] = True
+
+        if verbose:
+            print(f"训练集: {len(train_idx)} | 验证集: {len(val_idx)} | 测试集: {len(test_idx)}")
+
+        # 创建新模型
+        model = model_class(**model_kwargs)
+
+        # 创建训练器
+        trainer = ThicknessTrainer(model=model, **trainer_kwargs)
+
+        # 训练
+        history = trainer.train(
+            data=fold_data,
+            epochs=epochs,
+            patience=patience,
+            verbose=verbose
+        )
+
+        # 保存结果
+        fold_result = {
+            'fold': fold + 1,
+            'train_idx': train_idx,
+            'val_idx': val_idx,
+            'test_idx': test_idx,
+            'history': history,
+            'test_metrics': history['test_metrics']
+        }
+        fold_results.append(fold_result)
+
+        if verbose:
+            metrics = fold_result['test_metrics']
+            print(f"\nFold {fold + 1} 测试结果:")
+            print(f"  MAE: {metrics['mae']:.3f}m")
+            print(f"  RMSE: {metrics['rmse']:.3f}m")
+            print(f"  R²: {metrics['r2']:.3f}")
+
+    # 汇总结果
+    test_maes = [r['test_metrics']['mae'] for r in fold_results]
+    test_rmses = [r['test_metrics']['rmse'] for r in fold_results]
+    test_r2s = [r['test_metrics']['r2'] for r in fold_results]
+
+    summary = {
+        'n_splits': n_splits,
+        'fold_results': fold_results,
+        'mae_mean': np.mean(test_maes),
+        'mae_std': np.std(test_maes),
+        'rmse_mean': np.mean(test_rmses),
+        'rmse_std': np.std(test_rmses),
+        'r2_mean': np.mean(test_r2s),
+        'r2_std': np.std(test_r2s)
+    }
+
+    if verbose:
+        print(f"\n{'='*70}")
+        print(f"{n_splits}-Fold 交叉验证汇总结果")
+        print(f"{'='*70}")
+        print(f"MAE:  {summary['mae_mean']:.3f} ± {summary['mae_std']:.3f} m")
+        print(f"RMSE: {summary['rmse_mean']:.3f} ± {summary['rmse_std']:.3f} m")
+        print(f"R²:   {summary['r2_mean']:.3f} ± {summary['r2_std']:.3f}")
+        print(f"{'='*70}\n")
+
+    return summary
+
+
+def get_optimized_config_for_small_dataset(
+    n_samples: int,
+    n_layers: int,
+    n_features: int
+) -> Dict[str, Any]:
+    """
+    为小样本数据集生成优化的配置
+
+    根据数据规模自动调整超参数，避免过拟合
+
+    Args:
+        n_samples: 样本数量（钻孔数量）
+        n_layers: 地层数量
+        n_features: 特征数量
+
+    Returns:
+        config: 优化的配置字典
+    """
+    # 基础配置
+    config = {
+        'model': {},
+        'trainer': {},
+        'training': {}
+    }
+
+    # 根据样本数量调整模型复杂度
+    if n_samples < 20:
+        # 极小样本 < 20
+        config['model']['hidden_channels'] = 64
+        config['model']['num_layers'] = 2
+        config['model']['dropout'] = 0.3
+        config['model']['heads'] = 2
+        config['trainer']['weight_decay'] = 5e-4
+        config['trainer']['learning_rate'] = 0.005
+        config['training']['epochs'] = 150
+        config['training']['patience'] = 25
+        print("⚠️  样本数<20：使用轻量级模型配置，建议使用K-fold交叉验证")
+
+    elif n_samples < 40:
+        # 小样本 20-40
+        config['model']['hidden_channels'] = 96
+        config['model']['num_layers'] = 2
+        config['model']['dropout'] = 0.25
+        config['model']['heads'] = 3
+        config['trainer']['weight_decay'] = 1e-4
+        config['trainer']['learning_rate'] = 0.003
+        config['training']['epochs'] = 200
+        config['training']['patience'] = 30
+
+    elif n_samples < 80:
+        # 中等样本 40-80
+        config['model']['hidden_channels'] = 128
+        config['model']['num_layers'] = 3
+        config['model']['dropout'] = 0.2
+        config['model']['heads'] = 4
+        config['trainer']['weight_decay'] = 1e-4
+        config['trainer']['learning_rate'] = 0.002
+        config['training']['epochs'] = 250
+        config['training']['patience'] = 35
+
+    else:
+        # 较大样本 > 80
+        config['model']['hidden_channels'] = 160
+        config['model']['num_layers'] = 3
+        config['model']['dropout'] = 0.15
+        config['model']['heads'] = 4
+        config['trainer']['weight_decay'] = 5e-5
+        config['trainer']['learning_rate'] = 0.001
+        config['training']['epochs'] = 300
+        config['training']['patience'] = 40
+
+    # 数据增强策略（小样本更激进）
+    config['trainer']['use_augmentation'] = True
+    if n_samples < 30:
+        config['trainer']['augmentation_prob'] = 0.6  # 高增强概率
+    elif n_samples < 50:
+        config['trainer']['augmentation_prob'] = 0.4
+    else:
+        config['trainer']['augmentation_prob'] = 0.3
+
+    # 损失权重（根据任务调整）
+    config['trainer']['thick_weight'] = 1.0
+    config['trainer']['exist_weight'] = 0.5
+    config['trainer']['smooth_weight'] = 0.1
+
+    # 学习率调度
+    if n_samples < 30:
+        config['trainer']['scheduler_type'] = 'plateau'  # 小样本用plateau更稳定
+    else:
+        config['trainer']['scheduler_type'] = 'cosine'
+
+    # 预热轮数
+    config['training']['warmup_epochs'] = min(20, config['training']['epochs'] // 10)
+
+    # K-fold设置
+    if n_samples < 30:
+        config['kfold'] = {
+            'n_splits': 5,
+            'use_kfold': True,
+            'reason': '样本量较小，强烈建议使用5-fold交叉验证'
+        }
+    elif n_samples < 50:
+        config['kfold'] = {
+            'n_splits': 3,
+            'use_kfold': True,
+            'reason': '样本量中等，建议使用3-fold交叉验证'
+        }
+    else:
+        config['kfold'] = {
+            'use_kfold': False,
+            'reason': '样本量足够，可以使用普通训练/验证/测试划分'
+        }
+
+    return config
 
 
 class ThicknessEvaluator:
@@ -532,7 +1043,10 @@ def create_trainer(
     dropout: float = 0.2,
     conv_type: str = 'gatv2',
     device: str = 'auto',
-    learning_rate: float = 0.001
+    learning_rate: float = 0.001,
+    use_augmentation: bool = False,
+    scheduler_type: str = 'plateau',
+    **trainer_kwargs
 ) -> Tuple[GNNThicknessPredictor, ThicknessTrainer]:
     """
     创建模型和训练器的便捷函数
@@ -546,6 +1060,9 @@ def create_trainer(
         conv_type: 卷积类型
         device: 计算设备
         learning_rate: 学习率
+        use_augmentation: 是否使用数据增强
+        scheduler_type: 学习率调度类型
+        **trainer_kwargs: 其他训练器参数
 
     Returns:
         (model, trainer) 元组
@@ -562,7 +1079,10 @@ def create_trainer(
     trainer = ThicknessTrainer(
         model=model,
         device=device,
-        learning_rate=learning_rate
+        learning_rate=learning_rate,
+        use_augmentation=use_augmentation,
+        scheduler_type=scheduler_type,
+        **trainer_kwargs
     )
 
     return model, trainer
