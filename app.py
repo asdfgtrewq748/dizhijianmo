@@ -1152,10 +1152,12 @@ def main():
                 with st.spinner("正在加载钻孔数据..."):
                     try:
                         # 创建处理器并加载数据
+                        # merge_coal=False 保留所有煤层的独立标识,不进行合并
                         processor = BoreholeDataProcessor(
                             k_neighbors=k_neighbors,
                             graph_type=graph_type,
-                            sample_interval=sample_interval
+                            sample_interval=sample_interval,
+                            merge_coal=False
                         )
 
                         df = processor.load_all_boreholes(data_dir)
