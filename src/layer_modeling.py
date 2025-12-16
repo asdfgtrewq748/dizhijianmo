@@ -291,18 +291,19 @@ class LayerDataProcessor:
         for layer in self.layer_order:
             count = layer_presence[layer]
             pct = 100 * count / total_boreholes
-            status = "✓" if count >= self.min_layer_occurrence else "⚠稀疏"
+            status = "[OK]" if count >= self.min_layer_occurrence else "[SPARSE]"
             print(f"  {layer}: {count}/{total_boreholes} ({pct:.1f}%) {status}")
 
         return result_df
 
     def fill_missing_thickness(self, thickness_df: pd.DataFrame) -> pd.DataFrame:
         """
-        填充缺失的厚度数据
+        填充缺失的厚度数据（改进：使用中位数而非0）
 
-        策略：
-        1. 对于煤层：用该层的平均厚度填充（煤层通常是连续的）
-        2. 对于非煤层：用邻近钻孔的IDW插值填充
+        策略（参考geological_modeling_algorithms）：
+        1. 对于有效数据的层：用IDW插值填充缺失位置
+        2. 对于全部缺失的层：用经验最小厚度0.5m填充（不是0！）
+        3. 煤层：如果插值结果太小，用中位数保护
         """
         df = thickness_df.copy()
         coords = df[['x', 'y']].values
@@ -323,15 +324,20 @@ class LayerDataProcessor:
             n_missing = missing_mask.sum()
 
             if n_valid == 0:
-                # 全部缺失，使用全局平均或设为0
-                print(f"  警告: {layer} 在所有钻孔中都缺失，设为0")
-                df.loc[missing_mask, col] = 0
+                # 关键修复：全部缺失时，用经验最小厚度（不是0！）
+                fill_value = 0.5  # 默认0.5米
+                print(f"  警告: {layer} 在所有钻孔中都缺失，使用经验最小厚度{fill_value}m")
+                df.loc[missing_mask, col] = fill_value
                 continue
 
             # 使用IDW插值填充
             valid_coords = coords[valid_mask]
             valid_values = df.loc[valid_mask, col].values
             missing_coords = coords[missing_mask]
+
+            # 计算中位数用于保护
+            median_thickness = np.median(valid_values)
+            min_thickness = np.min(valid_values)
 
             # KNN + IDW
             tree = KDTree(valid_coords)
@@ -349,15 +355,17 @@ class LayerDataProcessor:
             # 插值
             interpolated = np.sum(weights * valid_values[indices], axis=1)
 
-            # 煤层使用更保守的策略：如果插值结果太小，用平均值
+            # 关键修复：使用中位数保护（不是平均值）
             if '煤' in layer:
-                mean_thickness = valid_values.mean()
-                # 如果插值结果小于平均值的30%，用平均值
-                interpolated = np.where(interpolated < mean_thickness * 0.3,
-                                        mean_thickness, interpolated)
+                # 煤层：如果插值结果太小，用中位数
+                min_threshold = max(median_thickness * 0.5, min_thickness * 0.5, 0.5)
+                interpolated = np.maximum(interpolated, min_threshold)
+            else:
+                # 非煤层：至少保证最小厚度0.5m
+                interpolated = np.maximum(interpolated, 0.5)
 
             df.loc[missing_mask, col] = interpolated
-            print(f"  填充 {layer}: {n_missing}个缺失值 (使用{n_valid}个有效点插值)")
+            print(f"  填充 {layer}: {n_missing}个缺失值 (使用{n_valid}个有效点插值，中位数={median_thickness:.2f}m)")
 
         return df
 
@@ -757,13 +765,15 @@ class LayerBasedGeologicalModeling:
         use_gnn: bool = True,
         interpolation_method: str = 'rbf',
         smooth_surfaces: bool = True,
-        smooth_sigma: float = 1.0
+        smooth_sigma: float = 1.0,
+        min_thickness_floor: float = 0.5  # 最小厚度下限，避免被挤成0体素
     ):
         self.resolution = resolution
         self.use_gnn = use_gnn
         self.interpolation_method = interpolation_method
         self.smooth_surfaces = smooth_surfaces
         self.smooth_sigma = smooth_sigma
+        self.min_thickness_floor = max(min_thickness_floor, 0.0)
 
         # 结果
         self.bounds = None
@@ -839,18 +849,186 @@ class LayerBasedGeologicalModeling:
 
         return bottom_surface
 
+    def _enforce_columnwise_order(
+        self,
+        all_bottoms: List[np.ndarray],
+        all_tops: List[np.ndarray],
+        all_thickness: List[np.ndarray],
+        layer_order: List[str],
+        min_gap: float = 0.5,
+        min_thickness: float = 0.5,
+        verbose: bool = True
+    ) -> Tuple[List[np.ndarray], List[np.ndarray]]:
+        """
+        逐列强制重排序层序（参考geological_modeling_algorithms）
+
+        对每个(i,j)垂直柱子，按底面深度从小到大排序，然后自下而上重新码放，
+        保证相邻层之间有min_gap，每层厚度不小于min_thickness。
+
+        Args:
+            all_bottoms: 所有层的底面列表
+            all_tops: 所有层的顶面列表
+            all_thickness: 所有层的厚度列表
+            layer_order: 层名顺序
+            min_gap: 最小层间间隙（米）
+            min_thickness: 最小层厚（米）
+            verbose: 是否打印信息
+
+        Returns:
+            重排序后的 (all_bottoms, all_tops)
+        """
+        nlay = len(all_bottoms)
+        if nlay < 2:
+            return all_bottoms, all_tops
+
+        if verbose:
+            print(f"  最小间隙: {min_gap}m, 最小厚度: {min_thickness}m")
+
+        # 转为numpy数组 (nlay, nx, ny)
+        bottoms = np.stack(all_bottoms)
+        tops = np.stack(all_tops)
+
+        nx, ny = bottoms.shape[1:]
+        total_cells = nx * ny
+        fixed_count = 0
+
+        # 逐列处理
+        for i in range(nx):
+            for j in range(ny):
+                # 提取这一列的所有层
+                bcol = bottoms[:, i, j]
+                tcol = tops[:, i, j]
+
+                # 找出有效的层（bottom和top都是有限值）
+                valid_idx = np.where(np.isfinite(bcol) & np.isfinite(tcol))[0]
+                if valid_idx.size == 0:
+                    continue
+
+                # 按原始bottom深度排序（从浅到深，即从下到上）
+                order = valid_idx[np.argsort(bcol[valid_idx])]
+
+                # 检查是否需要修复
+                needs_fix = False
+                for ii in range(len(order) - 1):
+                    if tops[order[ii], i, j] + min_gap > bottoms[order[ii+1], i, j]:
+                        needs_fix = True
+                        break
+
+                if not needs_fix:
+                    continue
+
+                fixed_count += 1
+
+                # 这一列最底部的起始深度
+                z_cur = float(np.min(bcol[valid_idx]))
+
+                # 自下而上重新码放
+                for idx in order:
+                    # 计算厚度
+                    thick = float(tcol[idx] - bcol[idx])
+                    if not np.isfinite(thick) or thick < min_thickness:
+                        thick = min_thickness
+
+                    # 重新设置底面和顶面
+                    bottoms[idx, i, j] = z_cur
+                    tops[idx, i, j] = z_cur + thick
+
+                    # 更新下一层的起始位置
+                    z_cur = tops[idx, i, j] + float(min_gap)
+
+        if verbose:
+            print(f"  修复了 {fixed_count}/{total_cells} 个垂直柱 ({fixed_count/total_cells*100:.1f}%)")
+
+        # 转回列表
+        all_bottoms_new = [bottoms[k] for k in range(nlay)]
+        all_tops_new = [tops[k] for k in range(nlay)]
+
+        return all_bottoms_new, all_tops_new
+
+    def _check_vertical_order(
+        self,
+        all_bottoms: List[np.ndarray],
+        all_tops: List[np.ndarray],
+        layer_order: List[str]
+    ) -> Dict[str, int]:
+        """
+        检查相邻层在每个网格点的垂向顺序（参考geological_modeling_algorithms）
+
+        检查是否存在 upper.bottom < lower.top 的情况（即重叠）
+        """
+        nlay = len(all_bottoms)
+        if nlay < 2:
+            print("  只有1层，无需检查")
+            return {}
+
+        bottoms = np.stack(all_bottoms)
+        tops = np.stack(all_tops)
+
+        ny, nx = bottoms.shape[1:]
+        total_cells = ny * nx
+
+        print(f"\n[垂向顺序检查] 共 {nlay} 层，{total_cells} 个网格点")
+        print(f"{'状态':>4} {'层号':>4} {'下层':>15} {'上层':>15} {'重叠点':>10} {'重叠率':>10} {'最大重叠':>12}")
+        print("-" * 82)
+
+        total_bad = 0
+        results = {}
+
+        for k in range(nlay - 1):
+            lower_top = tops[k]
+            upper_bottom = bottoms[k + 1]
+
+            # 只在有效点检查
+            valid = np.isfinite(lower_top) & np.isfinite(upper_bottom)
+            bad = valid & (upper_bottom < lower_top)
+
+            bad_count = int(bad.sum())
+            valid_count = int(valid.sum())
+
+            lower_name = layer_order[k]
+            upper_name = layer_order[k + 1]
+
+            if valid_count > 0:
+                bad_percent = (bad_count / valid_count) * 100
+
+                # 计算最大重叠量
+                overlap = np.where(bad, lower_top - upper_bottom, 0.0)
+                max_overlap = float(np.max(overlap)) if bad_count > 0 else 0.0
+
+                status = "[X]" if bad_count > 0 else "[OK]"
+                print(f"{status} {k:>4} {lower_name:>15} {upper_name:>15} {bad_count:>10} {bad_percent:>9.1f}% {max_overlap:>11.2f}m")
+
+                total_bad += bad_count
+                results[f"{lower_name}→{upper_name}"] = {
+                    'bad_count': bad_count,
+                    'total_count': valid_count,
+                    'max_overlap': max_overlap
+                }
+            else:
+                print(f"[WARN] {k:>4} {lower_name:>15} {upper_name:>15} {'无有效点':>10}")
+
+        print("-" * 82)
+        if total_bad == 0:
+            print(f"[OK] 检查通过: 所有相邻层在所有网格点都满足垂向顺序\n")
+        else:
+            print(f"[ERROR] 检查失败: 共 {total_bad} 个网格点存在层间重叠\n")
+
+        return results
+
     def _interpolate_thickness(
         self,
         thickness_df: pd.DataFrame,
         layer_name: str,
-        min_thickness: float = None
+        min_thickness: float = 0.5,
+        verbose: bool = False
     ) -> np.ndarray:
         """
         使用传统插值预测某层厚度
 
-        改进：
-        1. 对于煤层，使用更保守的插值策略，确保连续性
-        2. 对于缺失数据多的层，使用更平滑的插值
+        改进（参考geological_modeling_algorithms）：
+        1. NaN填充使用中位数而非0（避免零厚度导致层重叠）
+        2. 强制最小厚度0.5m（防止薄层被挤压消失）
+        3. 对于煤层，使用更保守的插值策略
         """
         col_name = f'thickness_{layer_name}'
 
@@ -858,23 +1036,42 @@ class LayerBasedGeologicalModeling:
         valid_mask = thickness_df[col_name].notna() & (thickness_df[col_name] > 0)
         n_valid = valid_mask.sum()
 
+        nx, ny, _ = self.resolution
+
         if n_valid == 0:
-            # 该层没有有效数据，返回零厚度
-            nx, ny, _ = self.resolution
-            return np.zeros((nx, ny))
+            # 该层没有有效数据，返回最小厚度（不是0）
+            print(f"    {layer_name}: 无有效数据，使用最小厚度{min_thickness:.2f}m")
+            return np.full((nx, ny), min_thickness)
 
         points = thickness_df.loc[valid_mask, ['x', 'y']].values
         values = thickness_df.loc[valid_mask, col_name].values
 
-        # 计算平均厚度用于煤层的最小保障
+        # 计算统计量用于填充和限制
         mean_thickness = values.mean()
+        median_thickness = np.median(values)
+        min_valid_thickness = values.min()
+        max_valid_thickness = values.max()
+        
+        # 关键修复：根据岩性类型设置合理上限（防止插值外推爆炸）
+        if '煤' in layer_name:
+            # 煤层一般较薄，单层通常<30m
+            max_reasonable_thickness = min(max_valid_thickness * 2, 30.0)
+        elif any(x in layer_name for x in ['砾岩', '砂岩', '泥岩', '粉砂岩', '砂质泥岩', '炭质泥岩']):
+            # 碎屑岩层厚度适中，一般<50m
+            max_reasonable_thickness = min(max_valid_thickness * 2, 50.0)
+        elif any(x in layer_name for x in ['黄土', '黏土', '表土']):
+            # 覆盖层较薄，一般<20m
+            max_reasonable_thickness = min(max_valid_thickness * 2, 20.0)
+        else:
+            # 其他岩性，保守上限50m
+            max_reasonable_thickness = min(max_valid_thickness * 2, 50.0)
 
         # 根据数据点数量选择插值方法
         if n_valid < 3:
-            # 数据太少，使用最近邻或常数填充
-            nx, ny, _ = self.resolution
-            thickness = np.full((nx, ny), mean_thickness)
-            print(f"    {layer_name}: 数据点仅{n_valid}个，使用平均厚度{mean_thickness:.2f}m填充")
+            # 数据太少，使用中位数填充（更稳健）
+            fill_value = max(median_thickness, min_thickness)
+            thickness = np.full((nx, ny), fill_value)
+            print(f"    {layer_name}: 数据点仅{n_valid}个，使用中位数{fill_value:.2f}m填充")
         else:
             # RBF插值
             if self.interpolation_method == 'rbf':
@@ -886,24 +1083,33 @@ class LayerBasedGeologicalModeling:
                     smoothing=smoothing
                 )
             else:
-                interpolator = LinearNDInterpolator(points, values, fill_value=mean_thickness)
+                # 线性插值：NaN区域使用中位数填充
+                interpolator = LinearNDInterpolator(points, values, fill_value=median_thickness)
 
-            nx, ny, _ = self.resolution
             thickness = interpolator(self.grid_xy).reshape(nx, ny)
 
-        # 确保非负
-        thickness = np.maximum(thickness, 0)
+            # 关键修复：将插值产生的NaN用中位数填充（不是0！）
+            nan_mask = ~np.isfinite(thickness)
+            if nan_mask.any():
+                fill_value = max(median_thickness, min_thickness)
+                thickness[nan_mask] = fill_value
+                nan_count = nan_mask.sum()
+                print(f"    {layer_name}: {nan_count}个位置插值失败，用中位数{fill_value:.2f}m填充")
 
-        # 煤层特殊处理：确保最小厚度
-        if '煤' in layer_name and min_thickness is None:
-            min_thickness = mean_thickness * 0.3  # 煤层至少保持平均厚度的30%
+        # 确保非负且不小于最小厚度
+        thickness = np.maximum(thickness, min_thickness)
+        
+        # 关键修复：使用合理上限防止外推产生极端值
+        thickness = np.minimum(thickness, max_reasonable_thickness)
+        
+        if verbose and n_valid >= 3:
+            print(f"    {layer_name}: 数据点{n_valid}个，中位数={median_thickness:.2f}m，上限={max_reasonable_thickness:.2f}m")
 
-        if min_thickness is not None and min_thickness > 0:
-            # 在有数据支持的区域，确保最小厚度
-            thickness = np.maximum(thickness, min_thickness)
-
+        # 平滑
         if self.smooth_surfaces:
             thickness = gaussian_filter(thickness, sigma=self.smooth_sigma)
+            # 平滑后再次保证范围
+            thickness = np.clip(thickness, min_thickness, max_reasonable_thickness)
 
         return thickness
 
@@ -1009,6 +1215,8 @@ class LayerBasedGeologicalModeling:
             layer_thickness = grid_thickness[:, i].reshape(nx, ny)
             if self.smooth_surfaces:
                 layer_thickness = gaussian_filter(layer_thickness, sigma=self.smooth_sigma)
+            if self.min_thickness_floor > 0:
+                layer_thickness = np.where(layer_thickness > 0, np.maximum(layer_thickness, self.min_thickness_floor), 0)
             thickness_dict[layer_name] = layer_thickness
 
         return thickness_dict
@@ -1075,7 +1283,9 @@ class LayerBasedGeologicalModeling:
                 print("  使用传统插值...")
             thickness_dict = {}
             for layer_name in processor.layer_order:
-                thickness_dict[layer_name] = self._interpolate_thickness(thickness_df, layer_name)
+                thickness_dict[layer_name] = self._interpolate_thickness(
+                    thickness_df, layer_name, min_thickness=0.5, verbose=verbose
+                )
 
         # 4. 逐层累加构建曲面
         if verbose:
@@ -1083,9 +1293,18 @@ class LayerBasedGeologicalModeling:
 
         current_surface = bottom_surface.copy()
 
+        # 保存所有层的底面和顶面用于后续重排序
+        all_bottoms = []
+        all_tops = []
+        all_thickness = []
+
         for layer_name in processor.layer_order:
             thickness = thickness_dict[layer_name]
             top_surface = current_surface + thickness
+
+            all_bottoms.append(current_surface.copy())
+            all_tops.append(top_surface.copy())
+            all_thickness.append(thickness)
 
             self.surfaces[layer_name] = {
                 'bottom': current_surface.copy(),
@@ -1099,14 +1318,45 @@ class LayerBasedGeologicalModeling:
 
             current_surface = top_surface
 
+        # 关键修复：逐列强制重排序（参考geological_modeling_algorithms）
+        if verbose:
+            print("\n[列重排序] 强制垂向顺序...")
+
+        all_bottoms, all_tops = self._enforce_columnwise_order(
+            all_bottoms, all_tops, all_thickness,
+            processor.layer_order, verbose=verbose
+        )
+
+        # 更新surfaces
+        for i, layer_name in enumerate(processor.layer_order):
+            self.surfaces[layer_name] = {
+                'bottom': all_bottoms[i],
+                'top': all_tops[i],
+                'thickness': all_tops[i] - all_bottoms[i]
+            }
+
+        # 验证垂向顺序
+        if verbose:
+            self._check_vertical_order(all_bottoms, all_tops, processor.layer_order)
+
         # 5. 体素化 - 使用向量化优化
         if verbose:
             print("\n体素化填充...")
+            print(f"  Z网格范围: {z_grid[0]:.1f} ~ {z_grid[-1]:.1f} m")
 
         self.lithology_3d = np.zeros((nx, ny, nz), dtype=np.int32)
 
         # 预计算z网格的索引映射
         z_min_grid, z_max_grid = z_grid[0], z_grid[-1]
+        
+        # 诊断：统计每层实际占用的z范围
+        if verbose:
+            print(f"\n  各层实际z范围（前10层）:")
+            for idx, layer_name in enumerate(processor.layer_order[:10]):
+                surface_info = self.surfaces[layer_name]
+                b_min, b_max = surface_info['bottom'].min(), surface_info['bottom'].max()
+                t_min, t_max = surface_info['top'].min(), surface_info['top'].max()
+                print(f"    {idx}. {layer_name}: bottom[{b_min:.1f}, {b_max:.1f}], top[{t_min:.1f}, {t_max:.1f}]")
 
         for layer_idx, layer_name in enumerate(processor.layer_order):
             surface_info = self.surfaces[layer_name]
@@ -1131,6 +1381,14 @@ class LayerBasedGeologicalModeling:
                 for j in range(ny):
                     k_start = k_start_2d[i, j]
                     k_end = k_end_2d[i, j]
+                    # 索引越界直接跳过
+                    if k_start >= nz:
+                        continue
+
+                    # 若厚度小于z分辨率导致同一索引，强制占至少1个体素
+                    if k_end <= k_start and thickness[i, j] > 0:
+                        k_end = min(k_start + 1, nz)
+
                     if k_end > k_start:
                         self.lithology_3d[i, j, k_start:k_end] = layer_idx
 
@@ -1333,7 +1591,7 @@ def build_layer_based_model(
         print("数据处理")
         print("=" * 60)
 
-    processor = LayerDataProcessor(k_neighbors=10)
+    processor = LayerDataProcessor(k_neighbors=10, min_layer_occurrence=1)
 
     # 先标准化岩性名称
     df = processor.standardize_lithology(df)
@@ -1342,6 +1600,8 @@ def build_layer_based_model(
 
     processor.infer_layer_order(df)
     thickness_df = processor.extract_thickness_data(df)
+    # 填充缺失厚度，防止稀疏层被当成0厚度
+    thickness_df = processor.fill_missing_thickness(thickness_df)
 
     if verbose:
         print(f"\n提取了 {len(thickness_df)} 个钻孔的厚度数据")

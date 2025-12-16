@@ -1638,11 +1638,16 @@ def main():
 
                             # 1. 数据处理
                             status.text("处理层序数据...")
-                            layer_processor = LayerDataProcessor(k_neighbors=10)
+                            layer_processor = LayerDataProcessor(
+                                k_neighbors=10,
+                                min_layer_occurrence=1  # 放宽层出现要求，避免被当成0层
+                            )
                             # 先标准化岩性名称
                             df = layer_processor.standardize_lithology(df)
                             layer_processor.infer_layer_order(df)
                             thickness_df = layer_processor.extract_thickness_data(df)
+                            # 填充缺失厚度，防止稀疏层厚度为0导致只剩两层
+                            thickness_df = layer_processor.fill_missing_thickness(thickness_df)
                             progress.progress(20)
 
                             thickness_trainer = None

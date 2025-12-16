@@ -19,6 +19,9 @@ from tqdm import tqdm
 import logging
 import gc
 
+# 厚度任务依赖
+from sklearn.metrics import mean_absolute_error
+
 # 尝试导入数据增强模块
 try:
     from .augmentation import GraphAugmentation, FeatureMixup
@@ -125,6 +128,272 @@ class LabelSmoothingLoss(nn.Module):
             loss = (-true_dist * log_probs).sum(dim=-1)
 
         return loss.mean()
+
+
+# ========== 厚度任务：损失与指标 ==========
+class ThicknessLoss(nn.Module):
+    """厚度 + 存在性多任务损失。
+
+    - 存在性：BCEWithLogitsLoss，可设置 pos_weight
+    - 厚度：SmoothL1Loss，仅在 mask=1 且存在层处计算，可乘 layer_weight
+    - 可选总厚度约束：约束预测厚度总和接近真实总和
+    """
+
+    def __init__(self, pos_weight: Optional[torch.Tensor] = None,
+                 layer_weights: Optional[torch.Tensor] = None,
+                 alpha_exist: float = 1.0,
+                 beta_thick: float = 1.0,
+                 gamma_total: float = 0.0):
+        super().__init__()
+        self.bce = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+        self.layer_weights = layer_weights
+        self.alpha_exist = alpha_exist
+        self.beta_thick = beta_thick
+        self.gamma_total = gamma_total
+
+    def forward(self, pred_thick: torch.Tensor, pred_exist_logit: torch.Tensor,
+                y_thick: torch.Tensor, y_exist: torch.Tensor, y_mask: torch.Tensor) -> torch.Tensor:
+        # 存在性损失
+        loss_exist = self.bce(pred_exist_logit, y_exist)
+
+        # 厚度损失，仅在 mask=1 位置
+        with torch.no_grad():
+            mask = y_mask.bool()
+        loss_thick_raw = F.smooth_l1_loss(pred_thick[mask], y_thick[mask], reduction='none') if mask.any() else pred_thick.sum()*0
+        if self.layer_weights is not None and mask.any():
+            lw = self.layer_weights.to(pred_thick.device)
+            lw = lw.unsqueeze(0).expand_as(y_thick)[mask]
+            loss_thick_raw = loss_thick_raw * lw
+        loss_thick = loss_thick_raw.mean() if mask.any() else torch.tensor(0.0, device=pred_thick.device)
+
+        # 总厚度约束（可选）
+        if self.gamma_total > 0:
+            total_pred = (pred_thick * torch.sigmoid(pred_exist_logit)).sum(dim=1)
+            total_true = y_thick.sum(dim=1)
+            loss_total = F.l1_loss(total_pred, total_true)
+        else:
+            loss_total = torch.tensor(0.0, device=pred_thick.device)
+
+        return self.alpha_exist * loss_exist + self.beta_thick * loss_thick + self.gamma_total * loss_total
+
+
+# ========== 厚度任务训练器 ==========
+class ThicknessTrainer:
+    """厚度/存在性联合训练器。"""
+
+    def __init__(
+        self,
+        model: nn.Module,
+        device: str = 'auto',
+        learning_rate: float = 1e-3,
+        weight_decay: float = 1e-4,
+        optimizer_type: str = 'adamw',
+        scheduler_type: str = 'plateau',
+        pos_weight: Optional[torch.Tensor] = None,
+        layer_weights: Optional[torch.Tensor] = None,
+        alpha_exist: float = 1.0,
+        beta_thick: float = 1.0,
+        gamma_total: float = 0.0,
+        use_ema: bool = True,
+        ema_decay: float = 0.995
+    ):
+        # 设备
+        if device == 'auto':
+            if torch.cuda.is_available():
+                try:
+                    test_tensor = torch.zeros(1).cuda()
+                    del test_tensor
+                    self.device = torch.device('cuda')
+                except Exception:
+                    self.device = torch.device('cpu')
+            else:
+                self.device = torch.device('cpu')
+        else:
+            self.device = torch.device(device)
+
+        self.model = model.to(self.device)
+
+        # 优化器
+        if optimizer_type == 'adam':
+            self.optimizer = Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+        else:
+            self.optimizer = AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+
+        # 调度器：监控 val_loss (min)
+        self.scheduler_type = scheduler_type
+        if scheduler_type == 'plateau':
+            self.scheduler = ReduceLROnPlateau(self.optimizer, mode='min', factor=0.5, patience=20, min_lr=1e-6)
+        elif scheduler_type == 'cosine':
+            self.scheduler = CosineAnnealingLR(self.optimizer, T_max=100, eta_min=1e-6)
+        else:
+            self.scheduler = None
+
+        # 损失
+        if pos_weight is not None:
+            pos_weight = pos_weight.to(self.device)
+        if layer_weights is not None:
+            layer_weights = layer_weights.to(self.device)
+        self.criterion = ThicknessLoss(pos_weight=pos_weight, layer_weights=layer_weights,
+                                       alpha_exist=alpha_exist, beta_thick=beta_thick, gamma_total=gamma_total)
+
+        # EMA
+        self.use_ema = use_ema
+        self.ema = EMA(self.model, decay=ema_decay) if use_ema else None
+
+        # 记录
+        self.best_val = float('inf')
+        self.best_state = None
+
+    def train_epoch(self, data: Data) -> Dict:
+        self.model.train()
+        data = data.to(self.device)
+        self.optimizer.zero_grad()
+
+        edge_attr = data.edge_attr if hasattr(data, 'edge_attr') else None
+        pred_thick, pred_exist_logit = self.model(data.x, data.edge_index, edge_attr)
+
+        loss = self.criterion(pred_thick, pred_exist_logit, data.y_thick, data.y_exist, data.y_mask)
+        loss.backward()
+        self.optimizer.step()
+
+        if self.use_ema:
+            self.ema.update()
+
+        with torch.no_grad():
+            exist_prob = torch.sigmoid(pred_exist_logit)
+            mae = F.l1_loss(pred_thick[data.train_mask], data.y_thick[data.train_mask], reduction='mean').item()
+            exist_acc = ((exist_prob[data.train_mask] > 0.5) == (data.y_exist[data.train_mask] > 0.5)).float().mean().item()
+
+        return {'loss': loss.item(), 'mae': mae, 'exist_acc': exist_acc}
+
+    def evaluate(self, data: Data, split: str = 'val') -> Dict:
+        self.model.eval()
+        data = data.to(self.device)
+
+        mask = data.val_mask if split == 'val' else data.test_mask
+        edge_attr = data.edge_attr if hasattr(data, 'edge_attr') else None
+
+        with torch.no_grad():
+            if self.use_ema:
+                self.ema.apply_shadow()
+
+            pred_thick, pred_exist_logit = self.model(data.x, data.edge_index, edge_attr)
+            loss = self.criterion(pred_thick, pred_exist_logit, data.y_thick, data.y_exist, data.y_mask)
+
+            exist_prob = torch.sigmoid(pred_exist_logit)
+            # 总 MAE（掩码内）
+            mask_bool = data.y_mask.bool()
+            mae = F.l1_loss(pred_thick[mask_bool], data.y_thick[mask_bool], reduction='mean').item() if mask_bool.any() else 0.0
+
+            # 分层 MAE
+            layer_mae = []
+            for li in range(data.y_thick.shape[1]):
+                layer_mask = mask_bool[:, li]
+                if layer_mask.any():
+                    layer_mae.append(F.l1_loss(pred_thick[layer_mask, li], data.y_thick[layer_mask, li], reduction='mean').item())
+                else:
+                    layer_mae.append(float('nan'))
+
+            # 存在性精度/召回
+            pred_exist = (exist_prob > 0.5).float()
+            exist_acc = (pred_exist[mask] == data.y_exist[mask]).float().mean().item()
+
+            if self.use_ema:
+                self.ema.restore()
+
+        return {
+            'loss': loss.item(),
+            'mae': mae,
+            'exist_acc': exist_acc,
+            'layer_mae': layer_mae
+        }
+
+    def fit(self, data: Data, epochs: int = 200, log_interval: int = 20, val_split: str = 'val'):
+        history = []
+        for epoch in range(1, epochs + 1):
+            train_metrics = self.train_epoch(data)
+            val_metrics = self.evaluate(data, split=val_split)
+
+            # 调度器按 val_loss
+            if self.scheduler_type == 'plateau' and self.scheduler is not None:
+                self.scheduler.step(val_metrics['loss'])
+            elif self.scheduler is not None and self.scheduler_type == 'cosine':
+                self.scheduler.step()
+
+            # 记录最佳
+            if val_metrics['loss'] < self.best_val:
+                self.best_val = val_metrics['loss']
+                self.best_state = {k: v.cpu() for k, v in self.model.state_dict().items()}
+
+            if epoch % log_interval == 0 or epoch == 1:
+                print(f"[Epoch {epoch}] train_loss={train_metrics['loss']:.4f} val_loss={val_metrics['loss']:.4f} "
+                      f"val_mae={val_metrics['mae']:.4f} exist_acc={val_metrics['exist_acc']:.4f}")
+                # 分层 MAE 简报（忽略 NaN）
+                layer_mae = val_metrics['layer_mae']
+                valid_mae = [m for m in layer_mae if not np.isnan(m)]
+                if valid_mae:
+                    print(f"  per-layer MAE (mean over valid layers): {np.mean(valid_mae):.4f}")
+
+            history.append({
+                'epoch': epoch,
+                'train_loss': train_metrics['loss'],
+                'val_loss': val_metrics['loss'],
+                'val_mae': val_metrics['mae'],
+                'exist_acc': val_metrics['exist_acc']
+            })
+
+        # 恢复最佳
+        if self.best_state is not None:
+            self.model.load_state_dict(self.best_state)
+
+        return history
+
+
+# ========== KFold 训练辅助函数 ==========
+def kfold_train_thickness(
+    data: Data,
+    fold_indices: List[Tuple[np.ndarray, np.ndarray]],
+    model_fn: Callable[[], nn.Module],
+    trainer_kwargs: Dict,
+    epochs: int = 200,
+    log_interval: int = 20
+):
+    """对厚度任务执行 K 折训练，返回每折的最佳 val_loss 和历史。
+
+    Args:
+        data: 包含 y_thick/y_exist/y_mask 的 Data
+        fold_indices: 列表，每个元素为 (train_idx, val_idx)
+        model_fn: 无参函数，返回新的模型实例
+        trainer_kwargs: 传给 ThicknessTrainer 的参数
+        epochs: 训练轮数
+        log_interval: 打印间隔
+    Returns:
+        results: 列表 [{'fold': i, 'best_val': ..., 'history': [...]}]
+    """
+    results = []
+    for i, (train_idx, val_idx) in enumerate(fold_indices):
+        fold_data = data.clone()
+        n = fold_data.num_nodes
+        train_mask = torch.zeros(n, dtype=torch.bool)
+        val_mask = torch.zeros(n, dtype=torch.bool)
+        test_mask = torch.zeros(n, dtype=torch.bool)
+        train_mask[train_idx] = True
+        val_mask[val_idx] = True
+        # test_mask 可留空或沿用原有
+        if hasattr(data, 'test_mask'):
+            test_mask = data.test_mask.clone()
+
+        fold_data.train_mask = train_mask
+        fold_data.val_mask = val_mask
+        fold_data.test_mask = test_mask
+
+        model = model_fn()
+        trainer = ThicknessTrainer(model=model, **trainer_kwargs)
+        print(f"\n=== Fold {i+1}/{len(fold_indices)} ===")
+        history = trainer.fit(fold_data, epochs=epochs, log_interval=log_interval, val_split='val')
+        results.append({'fold': i, 'best_val': trainer.best_val, 'history': history})
+
+    return results
 
 
 class GeoModelTrainer:

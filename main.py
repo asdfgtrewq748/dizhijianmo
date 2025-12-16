@@ -42,7 +42,8 @@ def run_full_pipeline(
     k_neighbors: int = 12,            # 适中的k值，避免过平滑
     grid_resolution: tuple = (50, 50, 50),
     output_dir: str = 'output',
-    modeling_method: str = 'layer'    # 'traditional', 'gnn', 'layer', 'all'
+    modeling_method: str = 'layer',   # 'traditional', 'gnn', 'layer', 'all'
+    merge_coal: bool = True
 ):
     """
     完整流程: 数据加载 → 训练 → 建模 → 导出
@@ -94,7 +95,8 @@ def run_full_pipeline(
         label_col='lithology',
         feature_cols=['layer_thickness', 'relative_depth', 'depth_ratio'],
         test_size=0.2,
-        val_size=0.1
+        val_size=0.1,
+        merge_coal=merge_coal
     )
 
     data = result['data']
@@ -395,7 +397,8 @@ def run_training_only(
     epochs: int = 200,
     sample_interval: float = 2.0,
     k_neighbors: int = 10,
-    output_dir: str = 'output'
+    output_dir: str = 'output',
+    merge_coal: bool = True
 ):
     """仅训练模型，不进行建模"""
     print("=" * 60)
@@ -411,7 +414,7 @@ def run_training_only(
         sample_interval=sample_interval
     )
     df = processor.load_all_boreholes(data_dir)
-    result = processor.process(df, feature_cols=['layer_thickness'])
+    result = processor.process(df, feature_cols=['layer_thickness'], merge_coal=merge_coal)
     data = result['data']
 
     # 创建并训练模型
@@ -440,7 +443,8 @@ def run_modeling_only(
     data_dir: str,
     preprocessor_path: str,
     resolution: tuple = (50, 50, 50),
-    output_dir: str = 'output'
+    output_dir: str = 'output',
+    merge_coal: bool = True
 ):
     """仅进行建模 (使用已训练的模型)"""
     print("=" * 60)
@@ -455,7 +459,7 @@ def run_modeling_only(
 
     # 加载数据
     df = processor.load_all_boreholes(data_dir)
-    result = processor.process(df, feature_cols=['layer_thickness'])
+    result = processor.process(df, feature_cols=['layer_thickness'], merge_coal=merge_coal)
     data = result['data']
 
     # 加载模型
@@ -555,6 +559,7 @@ def main():
     run_parser.add_argument('--modeling-method', type=str, default='layer',
                            choices=['traditional', 'gnn', 'layer', 'all'],
                            help='建模方法: traditional=传统插值, gnn=GNN直接预测, layer=层序累加(推荐), all=所有方法')
+    run_parser.add_argument('--no-merge-coal', action='store_true', help='不合并煤层，保留各煤层编号')
 
     # layer命令 (层序累加建模)
     layer_parser = subparsers.add_parser('layer', help='层序累加地质建模（推荐）')
@@ -581,6 +586,7 @@ def main():
     train_parser.add_argument('--sample-interval', type=float, default=1.0)
     train_parser.add_argument('--k-neighbors', type=int, default=12)
     train_parser.add_argument('--output', type=str, default='output')
+    train_parser.add_argument('--no-merge-coal', action='store_true', help='不合并煤层，保留各煤层编号')
 
     # model命令 (仅建模)
     model_parser = subparsers.add_parser('model', help='仅进行建模 (使用已有模型)')
@@ -589,6 +595,7 @@ def main():
     model_parser.add_argument('--preprocessor', type=str, default='output/preprocessor.json')
     model_parser.add_argument('--resolution', type=int, nargs=3, default=[50, 50, 50])
     model_parser.add_argument('--output', type=str, default='output')
+    model_parser.add_argument('--no-merge-coal', action='store_true', help='不合并煤层，保留各煤层编号 (需与训练时一致)')
 
     args = parser.parse_args()
 
@@ -609,7 +616,8 @@ def main():
             k_neighbors=args.k_neighbors,
             grid_resolution=tuple(args.resolution),
             output_dir=args.output,
-            modeling_method=args.modeling_method
+            modeling_method=args.modeling_method,
+            merge_coal=not args.no_merge_coal
         )
 
     elif args.command == 'train':
@@ -621,7 +629,8 @@ def main():
             epochs=args.epochs,
             sample_interval=args.sample_interval,
             k_neighbors=args.k_neighbors,
-            output_dir=args.output
+            output_dir=args.output,
+            merge_coal=not args.no_merge_coal
         )
 
     elif args.command == 'layer':
@@ -644,7 +653,8 @@ def main():
             data_dir=args.data,
             preprocessor_path=args.preprocessor,
             resolution=tuple(args.resolution),
-            output_dir=args.output
+            output_dir=args.output,
+            merge_coal=not args.no_merge_coal
         )
 
     else:

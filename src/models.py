@@ -11,6 +11,80 @@ from torch_geometric.nn import global_mean_pool, global_max_pool
 from typing import Optional, List, Tuple
 
 
+class GNNThicknessDualHead(nn.Module):
+    """厚度预测双头模型：存在性 + 厚度，厚度输出Softplus确保非负。
+
+    支持 edge_attr (距离)；默认使用 GATv2Conv 或 TransformerConv。
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        hidden_channels: int = 128,
+        num_layers: int = 3,
+        num_output_layers: int = 8,
+        dropout: float = 0.2,
+        heads: int = 4,
+        conv_type: str = 'gatv2'  # 'gatv2' | 'transformer' | 'sage'
+    ):
+        super().__init__()
+
+        self.num_layers = num_layers
+        self.dropout = dropout
+        self.conv_type = conv_type
+
+        # 输入投影
+        self.input_proj = nn.Sequential(
+            nn.Linear(in_channels, hidden_channels),
+            nn.LayerNorm(hidden_channels),
+            nn.GELU(),
+        )
+
+        self.convs = nn.ModuleList()
+        self.norms = nn.ModuleList()
+
+        for _ in range(num_layers):
+            if conv_type == 'transformer':
+                self.convs.append(
+                    TransformerConv(hidden_channels, hidden_channels // heads, heads=heads,
+                                    dropout=dropout, edge_dim=1, beta=True)
+                )
+            elif conv_type == 'gatv2':
+                self.convs.append(
+                    GATv2Conv(hidden_channels, hidden_channels // heads, heads=heads,
+                              dropout=dropout, concat=True, edge_dim=1)
+                )
+            else:  # sage fallback
+                self.convs.append(SAGEConv(hidden_channels, hidden_channels))
+            self.norms.append(nn.LayerNorm(hidden_channels))
+
+        # 双头输出
+        self.exist_head = nn.Linear(hidden_channels, num_output_layers)
+        self.thick_head = nn.Linear(hidden_channels, num_output_layers)
+        self.softplus = nn.Softplus()
+
+    def forward(self, x: torch.Tensor, edge_index: torch.Tensor,
+                edge_attr: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+        h = self.input_proj(x)
+
+        for conv, norm in zip(self.convs, self.norms):
+            h_res = h
+            if isinstance(conv, (TransformerConv, GATv2Conv)):
+                h = conv(h, edge_index, edge_attr=edge_attr)
+            else:
+                h = conv(h, edge_index)
+            h = norm(h)
+            h = F.gelu(h)
+            h = F.dropout(h, p=self.dropout, training=self.training)
+            # 残差
+            if h.shape == h_res.shape:
+                h = h + h_res
+
+        exist_logit = self.exist_head(h)
+        thick = self.softplus(self.thick_head(h))
+        return thick, exist_logit
+
+
 class GeoGCN(nn.Module):
     """
     基于GCN的地质建模网络 (增强版)
@@ -736,15 +810,16 @@ def get_thickness_model(model_type: str = 'sage', **kwargs) -> nn.Module:
     Returns:
         model: 厚度预测模型
     """
-    from src.layer_modeling import GNNThicknessPredictor
 
-    return GNNThicknessPredictor(
+    # 新版默认使用内置双头模型，支持 edge_attr。保留 model_type 选择卷积类型。
+    return GNNThicknessDualHead(
         in_channels=kwargs.get('in_channels', 4),
         hidden_channels=kwargs.get('hidden_channels', 128),
         num_layers=kwargs.get('num_layers', 4),
         num_output_layers=kwargs.get('num_output_layers', 5),
         dropout=kwargs.get('dropout', 0.3),
-        model_type=model_type
+        heads=kwargs.get('heads', 4),
+        conv_type=kwargs.get('conv_type', 'gatv2' if model_type == 'gat' else ('transformer' if model_type == 'transformer' else 'sage'))
     )
 
 

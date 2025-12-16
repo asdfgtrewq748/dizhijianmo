@@ -310,6 +310,304 @@ class BoreholeDataProcessor:
 
         return combined_df
 
+    # ========== 厚度任务专用：直接读取“层表”（每层一行），不做层内采样 ==========
+    def load_single_borehole_layers(
+        self,
+        borehole_file: str,
+        borehole_id: str,
+        x: float,
+        y: float,
+        surface_z: float = 0.0
+    ) -> pd.DataFrame:
+        """读取单个钻孔的层表（每层一行）。保持文件原始行序作为层序。
+
+        Args:
+            borehole_file: 钻孔数据文件路径
+            borehole_id: 钻孔编号
+            x, y: 钻孔平面坐标
+            surface_z: 地表高程（默认0，向下为负）
+
+        Returns:
+            df_layers: 包含层级信息的DataFrame，列包括
+                borehole_id, x, y, lithology, layer_order, layer_thickness,
+                top_depth, bottom_depth, center_depth
+        """
+
+        if not os.path.exists(borehole_file):
+            print(f"警告: 钻孔文件不存在: {borehole_file}")
+            return pd.DataFrame()
+
+        df = None
+        last_error = None
+        for encoding in ['utf-8', 'gbk', 'gb2312', 'utf-8-sig', 'latin-1']:
+            try:
+                df = pd.read_csv(borehole_file, encoding=encoding)
+                break
+            except UnicodeDecodeError as e:
+                last_error = e
+                continue
+            except Exception as e:
+                print(f"警告: 读取 {borehole_file} 失败: {e}")
+                return pd.DataFrame()
+
+        if df is None:
+            print(f"警告: 无法以任何编码读取 {borehole_file}: {last_error}")
+            return pd.DataFrame()
+
+        df.columns = df.columns.str.strip()
+
+        col_mapping = {}
+        for col in df.columns:
+            col_lower = col.lower().strip()
+            if '序号' in col or 'id' in col_lower or 'no' in col_lower:
+                col_mapping[col] = 'layer_id'
+            elif '名称' in col or '岩性' in col or 'name' in col_lower or 'lith' in col_lower:
+                col_mapping[col] = 'lithology'
+            elif '厚度' in col or 'thick' in col_lower:
+                col_mapping[col] = 'layer_thickness'
+            elif '弹性模量' in col or 'elastic' in col_lower:
+                col_mapping[col] = 'elastic_modulus'
+            elif '容重' in col or 'density' in col_lower or '密度' in col:
+                col_mapping[col] = 'density'
+            elif '抗拉强度' in col or 'tensile' in col_lower:
+                col_mapping[col] = 'tensile_strength'
+
+        df = df.rename(columns=col_mapping)
+
+        if 'lithology' not in df.columns or 'layer_thickness' not in df.columns:
+            print(f"警告: {borehole_file} 缺少必要列, 跳过")
+            return pd.DataFrame()
+
+        # 按文件原始行序定义层序（顶部到最底部）
+        df = df.reset_index(drop=True)
+        df['layer_order'] = np.arange(len(df), dtype=np.int32)
+
+        df['layer_thickness'] = pd.to_numeric(df['layer_thickness'], errors='coerce').fillna(0)
+        cumulative_depth = df['layer_thickness'].cumsum()
+        df['top_depth'] = cumulative_depth.shift(1).fillna(0)
+        df['bottom_depth'] = cumulative_depth
+        df['center_depth'] = (df['top_depth'] + df['bottom_depth']) / 2
+
+        df['borehole_id'] = borehole_id
+        df['x'] = x
+        df['y'] = y
+        df['surface_z'] = surface_z
+
+        return df
+
+    def load_all_borehole_layers(
+        self,
+        data_dir: str,
+        coord_file: str = None,
+        surface_elevation: float = 0.0
+    ) -> pd.DataFrame:
+        """加载目录内所有钻孔的“层表”，保留每层一行。
+
+        返回合并后的层表 DataFrame。
+        """
+
+        if coord_file is None:
+            coord_files = glob.glob(os.path.join(data_dir, '*坐标*.csv'))
+            if coord_files:
+                coord_file = coord_files[0]
+            else:
+                raise FileNotFoundError("未找到坐标文件，请指定coord_file参数")
+
+        coord_df = self.load_coordinates(coord_file)
+        coord_map = {str(r['borehole_id']).strip(): (r['x'], r['y']) for _, r in coord_df.iterrows()}
+
+        all_csv = glob.glob(os.path.join(data_dir, '*.csv'))
+        borehole_files = [f for f in all_csv if '坐标' not in os.path.basename(f)]
+
+        all_layers = []
+        loaded = 0
+        for bh_file in borehole_files:
+            bh_id = os.path.splitext(os.path.basename(bh_file))[0]
+            if bh_id not in coord_map:
+                print(f"警告: 钻孔 {bh_id} 无坐标信息，跳过")
+                continue
+            x, y = coord_map[bh_id]
+            df_layers = self.load_single_borehole_layers(bh_file, bh_id, x, y, surface_elevation)
+            if not df_layers.empty:
+                all_layers.append(df_layers)
+                loaded += 1
+
+        if not all_layers:
+            raise ValueError("未加载任何钻孔层表")
+
+        combined = pd.concat(all_layers, ignore_index=True)
+        print(f"层表加载完成: 钻孔数 {loaded}, 总层数 {len(combined)}")
+        return combined
+
+    # ========== 厚度任务：构建节点级厚度/存在/掩码张量 ==========
+    def _infer_global_layer_order(self, df_layers: pd.DataFrame) -> List[str]:
+        """依据各钻孔的层位次序推断全局 layer_order。
+        思路：按每孔的行序赋位置，计算每个岩性的出现位置中位数，按中位数升序排序。
+        """
+        positions = {}
+        for bh_id, sub in df_layers.groupby('borehole_id'):
+            for idx, lith in zip(sub['layer_order'].values, sub['lithology'].values):
+                positions.setdefault(lith, []).append(idx)
+
+        layer_order = sorted(positions.keys(), key=lambda k: np.median(positions[k]))
+        print("自动推断的 layer_order:")
+        for i, name in enumerate(layer_order):
+            print(f"  {i}: {name} (样本数 {len(positions[name])})")
+        return layer_order
+
+    def process_thickness(
+        self,
+        df_layers: pd.DataFrame,
+        layer_order: Optional[List[str]] = None,
+        feature_cols: Optional[List[str]] = None,
+        test_size: float = 0.2,
+        val_size: float = 0.1,
+        merge_coal: bool = False,
+        split_mode: str = 'random',  # 'random' | 'kfold'
+        n_splits: int = 5,
+        random_seed: int = 42
+    ) -> Dict:
+        """厚度任务数据处理：每个钻孔一个节点，标签为各层厚度向量。
+
+        返回字典包含 PyG Data 与统计信息。
+        """
+
+        # 1) 岩性标准化，明确禁用煤层合并
+        df_layers = self.standardize_lithology(df_layers, merge_coal=merge_coal)
+
+        # 2) layer_order 确定
+        if layer_order is None:
+            layer_order = self._infer_global_layer_order(df_layers)
+        layer_to_idx = {name: i for i, name in enumerate(layer_order)}
+        num_layers = len(layer_order)
+
+        # 3) 按钻孔聚合，构造 y_thick / y_exist / y_mask
+        borehole_groups = list(df_layers.groupby('borehole_id'))
+        num_bh = len(borehole_groups)
+
+        y_thick = np.zeros((num_bh, num_layers), dtype=np.float32)
+        y_exist = np.zeros((num_bh, num_layers), dtype=np.float32)
+        y_mask = np.zeros((num_bh, num_layers), dtype=np.float32)
+
+        node_features = []
+        coords = []
+        bh_ids = []
+
+        for idx, (bh_id, sub) in enumerate(borehole_groups):
+            # 使用原始层序（行序）
+            sub = sub.sort_values('layer_order', ascending=True)
+            total_depth = sub['layer_thickness'].sum()
+            x = sub['x'].iloc[0]
+            y = sub['y'].iloc[0]
+            surface_z = sub.get('surface_z', pd.Series([0])).iloc[0]
+
+            coords.append([x, y, 0.0])  # 仅平面坐标，z=0
+            bh_ids.append(bh_id)
+
+            # 逐层填充
+            for _, row in sub.iterrows():
+                lith = row['lithology']
+                if lith not in layer_to_idx:
+                    continue
+                li = layer_to_idx[lith]
+                thickness = float(row['layer_thickness'])
+                y_thick[idx, li] = thickness
+                y_exist[idx, li] = 1.0
+                y_mask[idx, li] = 1.0
+
+            # 钻孔级特征：x, y, total_depth, surface_z
+            feat = [x, y, total_depth, surface_z]
+            if feature_cols:
+                for c in feature_cols:
+                    feat.append(sub[c].iloc[0] if c in sub.columns else np.nan)
+            node_features.append(feat)
+
+        node_features = np.array(node_features, dtype=np.float32)
+        coords = np.array(coords, dtype=np.float32)
+
+        # 4) 统计信息（存在率）
+        exist_counts = y_exist.sum(axis=0)
+        exist_rate = exist_counts / num_bh
+        print("层存在统计：")
+        for i, name in enumerate(layer_order):
+            print(f"  {name}: count={exist_counts[i]:.0f}, rate={exist_rate[i]:.2f}")
+        print("y_mask 每层非零计数:", y_mask.sum(axis=0))
+
+        # 5) 标准化特征与坐标
+        if self.normalize_coords:
+            coords_norm = self.coord_scaler.fit_transform(coords)
+        else:
+            coords_norm = coords
+
+        if self.normalize_features:
+            node_features = np.nan_to_num(node_features, nan=0.0)
+            node_features_norm = self.feature_scaler.fit_transform(node_features)
+        else:
+            node_features_norm = node_features
+
+        x_tensor = torch.tensor(node_features_norm, dtype=torch.float32)
+
+        # 6) 构图（KNN 默认使用 x,y 平面坐标）
+        edge_index, edge_weight = self.build_graph(coords)
+        edge_attr = edge_weight.view(-1, 1)
+
+        y_thick_t = torch.tensor(y_thick, dtype=torch.float32)
+        y_exist_t = torch.tensor(y_exist, dtype=torch.float32)
+        y_mask_t = torch.tensor(y_mask, dtype=torch.float32)
+
+        n_nodes = num_bh
+        indices = np.arange(n_nodes)
+        fold_indices = []
+        if split_mode == 'kfold':
+            # 仅划分训练+验证，保留 test_size 比例作为独立测试
+            train_val_idx, test_idx = train_test_split(indices, test_size=test_size, random_state=random_seed)
+            from sklearn.model_selection import KFold
+            kf = KFold(n_splits=n_splits, shuffle=True, random_state=random_seed)
+            for train_sub, val_sub in kf.split(train_val_idx):
+                fold_indices.append((train_val_idx[train_sub], train_val_idx[val_sub]))
+            # 默认使用第一折作为当前 data 的 mask，便于单次训练
+            train_idx, val_idx = fold_indices[0]
+        else:
+            train_val_idx, test_idx = train_test_split(indices, test_size=test_size, random_state=random_seed)
+            val_ratio = val_size / (1 - test_size)
+            train_idx, val_idx = train_test_split(train_val_idx, test_size=val_ratio, random_state=random_seed)
+
+        train_mask = torch.zeros(n_nodes, dtype=torch.bool)
+        val_mask = torch.zeros(n_nodes, dtype=torch.bool)
+        test_mask = torch.zeros(n_nodes, dtype=torch.bool)
+        train_mask[train_idx] = True
+        val_mask[val_idx] = True
+        test_mask[test_idx] = True
+
+        data = Data(
+            x=x_tensor,
+            edge_index=edge_index,
+            edge_attr=edge_attr,
+            edge_weight=edge_weight,
+            y_thick=y_thick_t,
+            y_exist=y_exist_t,
+            y_mask=y_mask_t,
+            train_mask=train_mask,
+            val_mask=val_mask,
+            test_mask=test_mask,
+            coords=torch.tensor(coords, dtype=torch.float32),
+            borehole_id=bh_ids,
+            layer_order=layer_order
+        )
+
+        return {
+            'data': data,
+            'num_features': x_tensor.shape[1],
+            'num_layers': num_layers,
+            'layer_order': layer_order,
+            'train_idx': train_idx,
+            'val_idx': val_idx,
+            'test_idx': test_idx,
+            'fold_indices': fold_indices,
+            'exist_rate': exist_rate,
+            'raw_df': df_layers
+        }
+
     def standardize_lithology(self, df: pd.DataFrame, merge_coal: bool = True) -> pd.DataFrame:
         """
         标准化岩性名称 (处理乱码、统一命名格式)
@@ -542,7 +840,8 @@ class BoreholeDataProcessor:
         label_col: str = 'lithology',
         feature_cols: Optional[List[str]] = None,
         test_size: float = 0.2,
-        val_size: float = 0.1
+        val_size: float = 0.1,
+        merge_coal: bool = True
     ) -> Dict:
         """
         处理钻孔数据并创建图数据集
@@ -554,11 +853,14 @@ class BoreholeDataProcessor:
             test_size: 测试集比例
             val_size: 验证集比例
 
+        Args:
+            merge_coal: 是否合并所有煤层为单一类别；为 False 时保留独立煤层编号
+
         Returns:
             data_dict: 包含训练/验证/测试数据的字典
         """
         # 标准化岩性名称
-        df = self.standardize_lithology(df)
+        df = self.standardize_lithology(df, merge_coal=merge_coal)
 
         # 提取坐标
         coords = df[['x', 'y', 'z']].values.astype(np.float32)
