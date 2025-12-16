@@ -1847,6 +1847,24 @@ def main():
                 x_grid = display_model.grid_info['x_grid']
                 y_grid = display_model.grid_info['y_grid']
                 z_grid = display_model.grid_info['z_grid']
+                
+                # 降采样以避免数据过大导致前端渲染失败
+                nx_orig, ny_orig, nz_orig = lithology_3d.shape
+                max_grid_size = 80  # 限制每个维度最大80个点
+                
+                if nx_orig > max_grid_size or ny_orig > max_grid_size or nz_orig > max_grid_size:
+                    # 计算降采样步长
+                    step_x = max(1, nx_orig // max_grid_size)
+                    step_y = max(1, ny_orig // max_grid_size)
+                    step_z = max(1, nz_orig // max_grid_size)
+                    
+                    # 降采样
+                    lithology_3d = lithology_3d[::step_x, ::step_y, ::step_z]
+                    x_grid = x_grid[::step_x]
+                    y_grid = y_grid[::step_y]
+                    z_grid = z_grid[::step_z]
+                    
+                    st.info(f"⚠️ 体素网格已降采样: {nx_orig}×{ny_orig}×{nz_orig} → {len(x_grid)}×{len(y_grid)}×{len(z_grid)} (为防止浏览器内存溢出)")
 
                 # 颜色转换函数
                 def color_to_rgb(color_str):
