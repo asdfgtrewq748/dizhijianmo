@@ -796,6 +796,18 @@ class LayerBasedGeologicalModeling:
         x_max += x_range * padding
         y_min -= y_range * padding
         y_max += y_range * padding
+        
+        # 关键修复：预估累加后的z范围，防止顶面超出网格
+        # 累加所有层的平均厚度来估算顶面高程
+        if 'layer_thickness' in df.columns and 'lithology' in df.columns:
+            # 估算总厚度：所有层的平均厚度之和
+            total_avg_thickness = df.groupby('lithology')['layer_thickness'].mean().sum()
+            # 留出足够的空间：底面向下10%，顶面向上累加厚度+20%余量
+            z_min = z_min - abs(z_max - z_min) * 0.1
+            z_max = z_min + total_avg_thickness * 1.2
+        else:
+            # 回退：如果没有厚度信息，假设顶面在地表附近
+            z_max = max(z_max, 0) + abs(z_max - z_min) * 0.5
 
         self.bounds = {
             'x': (x_min, x_max),
