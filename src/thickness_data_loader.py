@@ -638,6 +638,10 @@ class ThicknessDataBuilder:
         # 检查层名是否有编号后缀（如 粉砂岩_1）
         has_numbered_layers = any('_' in name and name.split('_')[-1].isdigit() for name in layer_order)
 
+        # 为df_layers添加位置标记的层名列
+        layer_name_list = []
+        df_layers_indexed = df_layers.copy()
+
         for idx, (bh_id, sub) in enumerate(borehole_groups):
             sub = sub.sort_values('layer_order', ascending=True)
             total_depth = sub['thickness'].sum()
@@ -648,12 +652,12 @@ class ThicknessDataBuilder:
             coords.append([x, y])
             bh_ids.append(bh_id)
 
-            # 填充各层厚度
+            # 填充各层厚度 + 记录位置标记的层名
             if has_numbered_layers:
                 # 带编号的层：需要跟踪每种岩性的出现次数
                 lith_occurrence = {}  # {岩性: 当前出现次数}
 
-                for _, row in sub.iterrows():
+                for row_idx, row in sub.iterrows():
                     lith = row['lithology']
 
                     # 计算当前出现序号
@@ -670,14 +674,19 @@ class ThicknessDataBuilder:
                         li = layer_to_idx[layer_name_with_num]
                         y_thick[idx, li] = float(row['thickness'])
                         y_exist[idx, li] = 1.0
+                        layer_name_list.append((row_idx, layer_name_with_num))
                     elif layer_name_without_num in layer_to_idx:
                         li = layer_to_idx[layer_name_without_num]
                         y_thick[idx, li] = float(row['thickness'])
                         y_exist[idx, li] = 1.0
+                        layer_name_list.append((row_idx, layer_name_without_num))
+                    else:
+                        layer_name_list.append((row_idx, layer_name_with_num))
             else:
                 # 无编号的层：直接匹配岩性名称
-                for _, row in sub.iterrows():
+                for row_idx, row in sub.iterrows():
                     lith = row['lithology']
+                    layer_name_list.append((row_idx, lith))
                     if lith not in layer_to_idx:
                         continue
                     li = layer_to_idx[lith]
@@ -716,6 +725,11 @@ class ThicknessDataBuilder:
                 total_depth / max(num_layers_in_bh, 1),  # 平均层厚
                 max_thickness / max(min_thickness, 0.1)  # 厚度变异系数
             ])
+
+        # 将位置标记的层名添加到df_layers
+        layer_name_df = pd.DataFrame(layer_name_list, columns=['_idx', 'layer_name'])
+        layer_name_df = layer_name_df.set_index('_idx')
+        df_layers_indexed['layer_name'] = df_layers_indexed.index.map(layer_name_df['layer_name'])
 
         node_features = np.array(node_features, dtype=np.float32)
         coords = np.array(coords, dtype=np.float32)
@@ -801,7 +815,7 @@ class ThicknessDataBuilder:
             'val_idx': val_idx,
             'test_idx': test_idx,
             'exist_rate': exist_rate,
-            'raw_df': df_layers,
+            'raw_df': df_layers_indexed,  # 包含 layer_name 列
             'borehole_coords': coords,
             'borehole_ids': bh_ids
         }

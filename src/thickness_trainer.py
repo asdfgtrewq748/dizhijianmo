@@ -759,7 +759,10 @@ def get_optimized_config_for_small_dataset(
     """
     为小样本数据集生成优化的配置
 
-    根据数据规模自动调整超参数，避免过拟合
+    针对地质厚度预测的特殊优化：
+    - 厚度范围大（0.5m~70m）：使用对数损失
+    - 层数多（46层）：需要足够的模型容量
+    - 样本少（28个）：需要强正则化
 
     Args:
         n_samples: 样本数量（钻孔数量）
@@ -769,100 +772,55 @@ def get_optimized_config_for_small_dataset(
     Returns:
         config: 优化的配置字典
     """
-    # 基础配置
     config = {
         'model': {},
         'trainer': {},
         'training': {}
     }
 
-    # 根据样本数量调整模型复杂度
-    if n_samples < 20:
-        # 极小样本 < 20
-        config['model']['hidden_channels'] = 64
-        config['model']['num_layers'] = 2
-        config['model']['dropout'] = 0.3
-        config['model']['heads'] = 2
-        config['trainer']['weight_decay'] = 5e-4
-        config['trainer']['learning_rate'] = 0.005
-        config['training']['epochs'] = 150
-        config['training']['patience'] = 25
-        print("⚠️  样本数<20：使用轻量级模型配置，建议使用K-fold交叉验证")
+    # 计算任务复杂度：输出维度 / 样本数
+    complexity_ratio = n_layers / max(n_samples, 1)
+    print(f"[配置] 任务复杂度: {n_layers}层 / {n_samples}样本 = {complexity_ratio:.2f}")
 
-    elif n_samples < 40:
-        # 小样本 20-40
-        config['model']['hidden_channels'] = 96
-        config['model']['num_layers'] = 2
-        config['model']['dropout'] = 0.25
-        config['model']['heads'] = 3
-        config['trainer']['weight_decay'] = 1e-4
-        config['trainer']['learning_rate'] = 0.003
-        config['training']['epochs'] = 200
-        config['training']['patience'] = 30
+    if complexity_ratio > 1.5:
+        print("⚠️  警告：层数远多于样本数，预测会很困难！")
 
-    elif n_samples < 80:
-        # 中等样本 40-80
-        config['model']['hidden_channels'] = 128
-        config['model']['num_layers'] = 3
-        config['model']['dropout'] = 0.2
-        config['model']['heads'] = 4
-        config['trainer']['weight_decay'] = 1e-4
-        config['trainer']['learning_rate'] = 0.002
-        config['training']['epochs'] = 250
-        config['training']['patience'] = 35
+    # 模型配置 - 对于这种高维输出任务，需要足够容量
+    # 关键：hidden_channels 需要与输出层数相匹配
+    heads = 4
+    hidden = max(128, n_layers * 3)  # 至少是层数的3倍
+    hidden = min(hidden, 256)  # 但不超过256
+    # 确保 hidden_channels 能被 heads 整除（GATv2Conv要求）
+    hidden = (hidden // heads) * heads
 
-    else:
-        # 较大样本 > 80
-        config['model']['hidden_channels'] = 160
-        config['model']['num_layers'] = 3
-        config['model']['dropout'] = 0.15
-        config['model']['heads'] = 4
-        config['trainer']['weight_decay'] = 5e-5
-        config['trainer']['learning_rate'] = 0.001
-        config['training']['epochs'] = 300
-        config['training']['patience'] = 40
+    config['model']['hidden_channels'] = hidden
+    config['model']['num_layers'] = 3
+    config['model']['dropout'] = 0.2
+    config['model']['heads'] = heads
 
-    # 数据增强策略（小样本更激进）
-    config['trainer']['use_augmentation'] = True
-    if n_samples < 30:
-        config['trainer']['augmentation_prob'] = 0.6  # 高增强概率
-    elif n_samples < 50:
-        config['trainer']['augmentation_prob'] = 0.4
-    else:
-        config['trainer']['augmentation_prob'] = 0.3
+    # 训练配置
+    config['trainer']['learning_rate'] = 0.001
+    config['trainer']['weight_decay'] = 1e-4
+    config['trainer']['use_augmentation'] = False  # 小样本关闭增强
+    config['trainer']['augmentation_prob'] = 0.0
+    config['trainer']['scheduler_type'] = 'plateau'
 
-    # 损失权重（根据任务调整）
-    config['trainer']['thick_weight'] = 1.0
-    config['trainer']['exist_weight'] = 0.5
-    config['trainer']['smooth_weight'] = 0.1
+    # 训练轮数 - 小样本需要更多轮来收敛
+    config['training']['epochs'] = 500
+    config['training']['patience'] = 60
+    config['training']['warmup_epochs'] = 50
 
-    # 学习率调度
-    if n_samples < 30:
-        config['trainer']['scheduler_type'] = 'plateau'  # 小样本用plateau更稳定
-    else:
-        config['trainer']['scheduler_type'] = 'cosine'
+    # K-fold建议
+    config['kfold'] = {
+        'n_splits': 3,
+        'use_kfold': False,
+        'reason': f'样本量({n_samples})相对层数({n_layers})较少，不建议K-fold'
+    }
 
-    # 预热轮数
-    config['training']['warmup_epochs'] = min(20, config['training']['epochs'] // 10)
-
-    # K-fold设置
-    if n_samples < 30:
-        config['kfold'] = {
-            'n_splits': 5,
-            'use_kfold': True,
-            'reason': '样本量较小，强烈建议使用5-fold交叉验证'
-        }
-    elif n_samples < 50:
-        config['kfold'] = {
-            'n_splits': 3,
-            'use_kfold': True,
-            'reason': '样本量中等，建议使用3-fold交叉验证'
-        }
-    else:
-        config['kfold'] = {
-            'use_kfold': False,
-            'reason': '样本量足够，可以使用普通训练/验证/测试划分'
-        }
+    print(f"[配置] 模型: hidden={config['model']['hidden_channels']}, "
+          f"layers={config['model']['num_layers']}, dropout={config['model']['dropout']}")
+    print(f"[配置] 训练: epochs={config['training']['epochs']}, "
+          f"patience={config['training']['patience']}, lr={config['trainer']['learning_rate']}")
 
     return config
 
@@ -1046,6 +1004,7 @@ def create_trainer(
     learning_rate: float = 0.001,
     use_augmentation: bool = False,
     scheduler_type: str = 'plateau',
+    heads: int = 4,
     **trainer_kwargs
 ) -> Tuple[GNNThicknessPredictor, ThicknessTrainer]:
     """
@@ -1062,6 +1021,7 @@ def create_trainer(
         learning_rate: 学习率
         use_augmentation: 是否使用数据增强
         scheduler_type: 学习率调度类型
+        heads: 注意力头数
         **trainer_kwargs: 其他训练器参数
 
     Returns:
@@ -1073,7 +1033,8 @@ def create_trainer(
         num_layers=gnn_layers,
         num_output_layers=num_layers,
         dropout=dropout,
-        conv_type=conv_type
+        conv_type=conv_type,
+        heads=heads
     )
 
     trainer = ThicknessTrainer(

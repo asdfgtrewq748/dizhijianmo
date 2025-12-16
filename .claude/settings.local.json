@@ -62,7 +62,10 @@
       "Bash(\"C:/Users/Administrator/anaconda3/envs/geomodel/python.exe\" -c \"\nimport sys\nsys.path.insert(0, ''E:/xiangmu/dizhijianmo'')\nfrom src.thickness_data_loader import ThicknessDataProcessor\n\nfor rate in [0.3, 0.5, 0.7]:\n    print(f''\\n========== 最小出现率 = {rate*100:.0f}% =========='')\n    processor = ThicknessDataProcessor(merge_coal=False)\n    result = processor.process_directory(\n        ''E:/xiangmu/dizhijianmo/data'',\n        layer_method=''position_based'',\n        min_occurrence_rate=rate\n    )\n    print(f''总层数: {len(result[\"\"layer_order\"\"])}'')\n\")",
       "Bash(\"C:/Users/Administrator/anaconda3/envs/geomodel/python.exe\" -c \"\nimport sys\nsys.path.insert(0, ''E:/xiangmu/dizhijianmo'')\nfrom src.thickness_data_loader import ThicknessDataProcessor\nimport io\nsys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding=''utf-8'')\n\nprint(''Test different occurrence rate thresholds:'')\nprint(''=''*50)\nfor rate in [0.3, 0.5, 0.6, 0.7]:\n    processor = ThicknessDataProcessor(merge_coal=False)\n    result = processor.process_directory(\n        ''E:/xiangmu/dizhijianmo/data'',\n        layer_method=''position_based'',\n        min_occurrence_rate=rate\n    )\n    print(f''Rate >= {rate*100:.0f}%: {len(result[\"\"layer_order\"\"])} layers'')\n\nprint()\nprint(''Compare with simple method:'')\nprocessor = ThicknessDataProcessor(merge_coal=False)\nresult = processor.process_directory(\n    ''E:/xiangmu/dizhijianmo/data'',\n    layer_method=''simple''\n)\nprint(f''Simple method: {len(result[\"\"layer_order\"\"])} layers'')\n\")",
       "Bash(python -m py_compile \"E:\\xiangmu\\dizhijianmo\\src\\thickness_trainer.py\")",
-      "Bash(python -m py_compile \"E:\\xiangmu\\dizhijianmo\\app.py\")"
+      "Bash(python -m py_compile \"E:\\xiangmu\\dizhijianmo\\app.py\")",
+      "Bash(python -m py_compile \"E:\\xiangmu\\dizhijianmo\\src\\gnn_thickness_modeling.py\")",
+      "Bash(python -m py_compile \"E:\\xiangmu\\dizhijianmo\\src\\thickness_predictor_v2.py\")",
+      "Bash(python -m py_compile \"E:\\xiangmu\\dizhijianmo\\src\\thickness_data_loader.py\")"
     ]
   }
 }

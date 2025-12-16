@@ -28,6 +28,9 @@ from src.thickness_trainer import (
     create_trainer, ThicknessTrainer, ThicknessEvaluator,
     k_fold_cross_validation, get_optimized_config_for_small_dataset
 )
+from src.thickness_predictor_v2 import (
+    PerLayerThicknessPredictor, HybridThicknessPredictor, evaluate_predictor
+)
 
 # 尝试导入 PyVista 渲染器
 PYVISTA_AVAILABLE = False
@@ -320,37 +323,82 @@ def main():
             min_occurrence_rate = 0.3
         k_neighbors = st.slider("K邻居数", 4, 20, 10, help="增加邻居数可提高空间关联性")
 
+        st.subheader("🔧 预测方法")
+        prediction_method = st.radio(
+            "选择厚度预测方法",
+            ["传统方法（IDW/Kriging）", "GNN深度学习"],
+            index=0,  # 默认传统方法
+            help="传统方法更适合小样本数据（<50个钻孔），GNN适合大数据集"
+        )
+        use_traditional = prediction_method == "传统方法（IDW/Kriging）"
+
+        if use_traditional:
+            st.info("✅ 传统地质统计学方法：IDW + Kriging，对小样本数据效果好")
+            interp_method = st.selectbox(
+                "插值方法",
+                ["idw", "kriging", "hybrid"],
+                format_func=lambda x: {"idw": "反距离加权(IDW)", "kriging": "克里金", "hybrid": "混合方法"}[x],
+                help="IDW简单稳定，Kriging考虑空间相关性，混合自动选择"
+            )
+
         st.subheader("🧠 模型配置")
 
-        # 添加自动配置选项
-        use_auto_config = st.checkbox(
-            "🤖 自动优化配置（推荐）",
-            value=True,
-            help="根据数据规模自动选择最优超参数，特别适合小样本数据"
-        )
-
-        if use_auto_config:
-            st.info("✅ 将根据数据规模自动优化所有参数")
-            # 用于显示，实际值在训练时计算
+        if use_traditional:
+            # 传统方法不需要复杂配置
+            st.info("传统方法无需配置神经网络参数")
+            # 设置默认值（不会用到，但避免变量未定义）
+            use_auto_config = False
             hidden_dim = 128
             gnn_layers = 3
             dropout = 0.2
             conv_type = 'gatv2'
-            epochs = 200
+            epochs = 1
             learning_rate = 0.001
-            patience = 30
+            patience = 10
+            use_kfold = False
+            n_splits = 3
         else:
-            hidden_dim = st.selectbox("隐藏层维度", [64, 96, 128, 160, 256], index=2, help="更大的维度可提高表达能力")
-            gnn_layers = st.slider("GNN层数", 2, 4, 3, help="更深的网络可捕获更远距离的空间关系")
-            conv_type = st.selectbox("卷积类型", ['gatv2', 'transformer', 'sage'], help="GATv2通常效果最好")
-            dropout = st.slider("Dropout", 0.0, 0.5, 0.2, step=0.05, help="防止过拟合")
+            # GNN方法需要配置
+            # 添加自动配置选项
+            use_auto_config = st.checkbox(
+                "🤖 自动优化配置（推荐）",
+                value=True,
+                help="根据数据规模自动选择最优超参数，特别适合小样本数据"
+            )
 
-            st.subheader("🎯 训练配置")
-            epochs = st.slider("训练轮数", 100, 500, 200, help="更多轮数通常效果更好")
-            learning_rate = st.select_slider("学习率",
-                                              options=[0.0001, 0.0005, 0.001, 0.002, 0.005],
-                                              value=0.001, help="较小的学习率更稳定")
-            patience = st.slider("早停耐心值", 15, 50, 30, help="更大的耐心值避免过早停止")
+            if use_auto_config:
+                st.info("✅ 将根据数据规模自动优化所有参数")
+                # 用于显示，实际值在训练时计算
+                hidden_dim = 128
+                gnn_layers = 3
+                dropout = 0.2
+                conv_type = 'gatv2'
+                epochs = 200
+                learning_rate = 0.001
+                patience = 30
+            else:
+                hidden_dim = st.selectbox("隐藏层维度", [64, 96, 128, 160, 256], index=2, help="更大的维度可提高表达能力")
+                gnn_layers = st.slider("GNN层数", 2, 4, 3, help="更深的网络可捕获更远距离的空间关系")
+                conv_type = st.selectbox("卷积类型", ['gatv2', 'transformer', 'sage'], help="GATv2通常效果最好")
+                dropout = st.slider("Dropout", 0.0, 0.5, 0.2, step=0.05, help="防止过拟合")
+
+                st.subheader("🎯 训练配置")
+                epochs = st.slider("训练轮数", 100, 500, 200, help="更多轮数通常效果更好")
+                learning_rate = st.select_slider("学习率",
+                                                  options=[0.0001, 0.0005, 0.001, 0.002, 0.005],
+                                                  value=0.001, help="较小的学习率更稳定")
+                patience = st.slider("早停耐心值", 15, 50, 30, help="更大的耐心值避免过早停止")
+
+            # K-fold选项仅在GNN模式下显示
+            use_kfold = st.checkbox(
+                "使用K-fold交叉验证",
+                value=False,
+                help="交叉验证可以更准确评估模型性能"
+            )
+            if use_kfold:
+                n_splits = st.slider("折数", 3, 5, 3)
+            else:
+                n_splits = 3
 
         st.subheader("🗺️ 建模配置")
         resolution = st.slider("网格分辨率", 20, 100, 50)
@@ -368,6 +416,13 @@ def main():
         st.session_state.history = None
     if 'block_models' not in st.session_state:
         st.session_state.block_models = None
+    # 传统方法相关
+    if 'traditional_predictor' not in st.session_state:
+        st.session_state.traditional_predictor = None
+    if 'use_traditional_method' not in st.session_state:
+        st.session_state.use_traditional_method = False
+    if 'traditional_metrics' not in st.session_state:
+        st.session_state.traditional_metrics = None
 
     # 标签页
     tab1, tab2, tab3, tab4 = st.tabs([
@@ -460,7 +515,11 @@ def main():
 
     # ==================== Tab 2: 模型训练 ====================
     with tab2:
-        st.header("GNN厚度预测模型训练")
+        # 根据选择的方法显示不同标题
+        if use_traditional:
+            st.header("传统地质统计学厚度预测")
+        else:
+            st.header("GNN厚度预测模型训练")
 
         if st.session_state.data_result is None:
             st.warning("⚠️ 请先在【数据加载】页面加载数据")
@@ -477,122 +536,201 @@ def main():
             st.write(f"**输出层数:** {result['num_layers']}")
             st.write(f"**钻孔数量:** {result['data'].x.shape[0]}")
 
-            # K-fold选项
-            use_kfold = st.checkbox(
-                "使用K-fold交叉验证",
-                value=False,
-                help="对于小样本数据，K-fold交叉验证可以更准确地评估模型性能"
-            )
+            if use_traditional:
+                # 传统方法说明
+                st.info(f"""
+                **传统方法优势:**
+                - 适合小样本（<50钻孔）
+                - 逐层独立建模
+                - 自动选择最佳插值法
+                """)
+            else:
+                # K-fold选项（仅GNN）
+                use_kfold = st.checkbox(
+                    "使用K-fold交叉验证",
+                    value=False,
+                    help="对于小样本数据，K-fold交叉验证可以更准确地评估模型性能"
+                )
 
-            if use_kfold:
-                n_splits = st.selectbox("Fold数量", [3, 5, 10], index=1)
-                st.info(f"将进行{n_splits}-fold交叉验证，评估更可靠但耗时更长")
+                if use_kfold:
+                    n_splits = st.selectbox("Fold数量", [3, 5, 10], index=1)
+                    st.info(f"将进行{n_splits}-fold交叉验证，评估更可靠但耗时更长")
 
             if st.button("🚀 开始训练", type="primary"):
-                with st.spinner("正在训练模型..."):
+                with st.spinner("正在训练模型..." if not use_traditional else "正在拟合模型..."):
                     try:
-                        # 获取优化配置（如果启用自动配置）
-                        if use_auto_config:
-                            n_samples = result['data'].x.shape[0]
-                            n_layers = result['num_layers']
-                            n_features = result['num_features']
+                        n_samples = result['data'].x.shape[0]
+                        n_layers_out = result['num_layers']
+                        n_features = result['num_features']
 
-                            opt_config = get_optimized_config_for_small_dataset(
-                                n_samples=n_samples,
-                                n_layers=n_layers,
-                                n_features=n_features
+                        if use_traditional:
+                            # ===== 传统方法训练 =====
+                            st.write("### 使用传统地质统计学方法...")
+
+                            # 获取原始数据
+                            raw_df = result['raw_df']
+                            layer_order = result['layer_order']
+
+                            # 选择预测器类型
+                            if interp_method == 'hybrid':
+                                predictor = HybridThicknessPredictor(
+                                    layer_order=layer_order,
+                                    kriging_threshold=10,
+                                    smooth_factor=0.3,
+                                    min_thickness=0.5
+                                )
+                            else:
+                                predictor = PerLayerThicknessPredictor(
+                                    layer_order=layer_order,
+                                    default_method=interp_method,
+                                    idw_power=2.0,
+                                    n_neighbors=8,
+                                    min_thickness=0.5
+                                )
+
+                            # 拟合模型 - 使用 layer_name 列（包含位置标记）
+                            predictor.fit(
+                                raw_df,
+                                x_col='x',
+                                y_col='y',
+                                layer_col='layer_name',  # 使用位置标记的层名
+                                thickness_col='thickness'
                             )
 
-                            st.info("📊 自动配置分析:")
-                            st.json({
-                                "样本数": n_samples,
-                                "层数": n_layers,
-                                "推荐模型": opt_config['model'],
-                                "推荐训练": opt_config['training'],
-                                "K-fold建议": opt_config['kfold']['reason'] if 'kfold' in opt_config else "N/A"
-                            })
+                            # 保存到session state
+                            st.session_state.traditional_predictor = predictor
+                            st.session_state.model = None  # 清除GNN模型
+                            st.session_state.use_traditional_method = True
+                            st.session_state.history = None
 
-                            # 使用优化的配置
-                            hidden_dim = opt_config['model']['hidden_channels']
-                            gnn_layers = opt_config['model']['num_layers']
-                            dropout = opt_config['model']['dropout']
-                            learning_rate = opt_config['trainer']['learning_rate']
-                            epochs = opt_config['training']['epochs']
-                            patience = opt_config['training']['patience']
+                            # 计算评估指标（在训练数据上）
+                            coords = result['borehole_coords']
+                            x_range = (coords[:, 0].min(), coords[:, 0].max())
+                            y_range = (coords[:, 1].min(), coords[:, 1].max())
+                            grid_x = np.linspace(x_range[0], x_range[1], 30)
+                            grid_y = np.linspace(y_range[0], y_range[1], 30)
 
-                            # 如果建议使用K-fold但用户没选，给出提示
-                            if opt_config['kfold']['use_kfold'] and not use_kfold:
-                                st.warning(f"⚠️ {opt_config['kfold']['reason']}")
-
-                        if use_kfold:
-                            # K-fold交叉验证
-                            st.write("### K-fold交叉验证训练中...")
-
-                            # 创建模型类和参数
-                            model_kwargs = {
-                                'in_channels': result['num_features'],
-                                'hidden_channels': hidden_dim,
-                                'num_layers': gnn_layers,
-                                'num_output_layers': result['num_layers'],
-                                'dropout': dropout,
-                                'conv_type': conv_type
-                            }
-
-                            trainer_kwargs = {
-                                'learning_rate': learning_rate,
-                                'use_augmentation': use_auto_config,  # 自动配置时启用增强
-                                'scheduler_type': 'plateau' if n_samples < 30 else 'cosine'
-                            }
-
-                            # 执行K-fold交叉验证
-                            cv_results = k_fold_cross_validation(
-                                model_class=GNNThicknessPredictor,
-                                model_kwargs=model_kwargs,
-                                data=result['data'],
-                                n_splits=n_splits,
-                                epochs=epochs,
-                                patience=patience,
-                                trainer_kwargs=trainer_kwargs,
-                                verbose=True
+                            eval_metrics = evaluate_predictor(
+                                predictor, raw_df, grid_x, grid_y,
+                                x_col='x', y_col='y',
+                                layer_col='layer_name',  # 使用位置标记的层名
+                                thickness_col='thickness'
                             )
+                            st.session_state.traditional_metrics = eval_metrics
 
-                            st.session_state.cv_results = cv_results
-                            st.session_state.use_kfold = True
-
-                            # 使用最佳fold的模型
-                            best_fold_idx = np.argmin([r['test_metrics']['mae'] for r in cv_results['fold_results']])
-                            st.info(f"✅ 交叉验证完成! 最佳fold: {best_fold_idx + 1}")
+                            st.success("✅ 传统方法拟合完成!")
 
                         else:
-                            # 普通训练
-                            # 创建模型和训练器
-                            model, trainer = create_trainer(
-                                num_features=result['num_features'],
-                                num_layers=result['num_layers'],
-                                hidden_channels=hidden_dim,
-                                gnn_layers=gnn_layers,
-                                dropout=dropout,
-                                conv_type=conv_type,
-                                learning_rate=learning_rate,
-                                use_augmentation=use_auto_config,  # 自动配置时启用增强
-                                scheduler_type='plateau' if use_auto_config and result['data'].x.shape[0] < 30 else 'cosine'
-                            )
+                            # ===== GNN方法训练 =====
+                            # 获取优化配置（如果启用自动配置）
+                            if use_auto_config:
+                                opt_config = get_optimized_config_for_small_dataset(
+                                    n_samples=n_samples,
+                                    n_layers=n_layers_out,
+                                    n_features=n_features
+                                )
 
-                            # 训练
-                            history = trainer.train(
-                                data=result['data'],
-                                epochs=epochs,
-                                patience=patience,
-                                warmup_epochs=20 if use_auto_config else 0,
-                                verbose=False
-                            )
+                                st.info("📊 自动配置分析:")
+                                st.json({
+                                    "样本数": n_samples,
+                                    "层数": n_layers_out,
+                                    "推荐模型": opt_config['model'],
+                                    "推荐训练": opt_config['training'],
+                                    "K-fold建议": opt_config['kfold']['reason'] if 'kfold' in opt_config else "N/A"
+                                })
 
-                            st.session_state.model = model
-                            st.session_state.trainer = trainer
-                            st.session_state.history = history
-                            st.session_state.use_kfold = False
+                                # 使用优化的配置
+                                hidden_dim = opt_config['model']['hidden_channels']
+                                gnn_layers = opt_config['model']['num_layers']
+                                dropout = opt_config['model']['dropout']
+                                learning_rate = opt_config['trainer']['learning_rate']
+                                epochs = opt_config['training']['epochs']
+                                patience = opt_config['training']['patience']
+                                use_augmentation = opt_config['trainer']['use_augmentation']
+                                warmup_epochs = opt_config['training']['warmup_epochs']
 
-                        st.success("✅ 训练完成!")
+                                # 如果不建议使用K-fold但用户选了，给出警告
+                                if use_kfold and not opt_config['kfold']['use_kfold']:
+                                    st.warning(f"⚠️ {opt_config['kfold']['reason']}")
+                            else:
+                                use_augmentation = False
+                                warmup_epochs = 0
+
+                            st.session_state.use_traditional_method = False
+
+                            if use_kfold:
+                                # K-fold交叉验证
+                                st.write("### K-fold交叉验证训练中...")
+
+                                # 创建模型类和参数
+                                heads = opt_config['model'].get('heads', 4) if use_auto_config else 4
+                                model_kwargs = {
+                                    'in_channels': n_features,
+                                    'hidden_channels': hidden_dim,
+                                    'num_layers': gnn_layers,
+                                    'num_output_layers': n_layers_out,
+                                    'dropout': dropout,
+                                    'conv_type': conv_type,
+                                    'heads': heads
+                                }
+
+                                trainer_kwargs = {
+                                    'learning_rate': learning_rate,
+                                    'use_augmentation': use_augmentation,
+                                    'scheduler_type': 'plateau'
+                                }
+
+                                # 执行K-fold交叉验证
+                                cv_results = k_fold_cross_validation(
+                                    model_class=GNNThicknessPredictor,
+                                    model_kwargs=model_kwargs,
+                                    data=result['data'],
+                                    n_splits=n_splits,
+                                    epochs=epochs,
+                                    patience=patience,
+                                    trainer_kwargs=trainer_kwargs,
+                                    verbose=True
+                                )
+
+                                st.session_state.cv_results = cv_results
+                                st.session_state.use_kfold = True
+
+                                # 使用最佳fold的模型
+                                best_fold_idx = np.argmin([r['test_metrics']['mae'] for r in cv_results['fold_results']])
+                                st.info(f"✅ 交叉验证完成! 最佳fold: {best_fold_idx + 1}")
+
+                            else:
+                                # 普通训练
+                                # 创建模型和训练器
+                                heads = opt_config['model'].get('heads', 4) if use_auto_config else 4
+                                model, trainer = create_trainer(
+                                    num_features=n_features,
+                                    num_layers=n_layers_out,
+                                    hidden_channels=hidden_dim,
+                                    gnn_layers=gnn_layers,
+                                    dropout=dropout,
+                                    conv_type=conv_type,
+                                    learning_rate=learning_rate,
+                                    use_augmentation=use_augmentation,
+                                    scheduler_type='plateau',
+                                    heads=heads
+                                )
+
+                                # 训练
+                                history = trainer.train(
+                                    data=result['data'],
+                                    epochs=epochs,
+                                    patience=patience,
+                                    warmup_epochs=warmup_epochs,
+                                    verbose=False
+                                )
+
+                                st.session_state.model = model
+                                st.session_state.trainer = trainer
+                                st.session_state.history = history
+                                st.session_state.use_kfold = False
+
+                            st.success("✅ 训练完成!")
 
                     except Exception as e:
                         st.error(f"❌ 训练失败: {str(e)}")
@@ -600,8 +738,70 @@ def main():
                         st.code(traceback.format_exc())
 
         with col2:
+            # 传统方法结果显示
+            if st.session_state.get('use_traditional_method', False) and st.session_state.get('traditional_predictor') is not None:
+                predictor = st.session_state.traditional_predictor
+                metrics = st.session_state.get('traditional_metrics') or {}
+
+                st.subheader("传统方法拟合结果")
+
+                # 显示评估指标
+                col_a, col_b, col_c, col_d = st.columns(4)
+                col_a.metric("MAE", f"{metrics.get('mae', 0):.3f} m")
+                col_b.metric("RMSE", f"{metrics.get('rmse', 0):.3f} m")
+                col_c.metric("R²", f"{metrics.get('r2', 0):.3f}")
+                col_d.metric("MAPE", f"{metrics.get('mape', 0):.1f}%")
+
+                # 显示每层的统计信息
+                st.subheader("各层拟合详情")
+                if hasattr(predictor, 'get_layer_summary'):
+                    summary_df = predictor.get_layer_summary()
+                    st.dataframe(summary_df, use_container_width=True)
+                elif hasattr(predictor, 'layer_stats'):
+                    stats_data = []
+                    for layer_name in predictor.layer_order:
+                        pred_info = predictor.predictors.get(layer_name, {})
+                        stats = pred_info.get('stats', {})
+                        stats_data.append({
+                            '地层': layer_name,
+                            '方法': pred_info.get('type', 'N/A'),
+                            '数据点': stats.get('n_points', 0),
+                            '均值(m)': f"{stats.get('mean', 0):.2f}",
+                            '中位数(m)': f"{stats.get('median', 0):.2f}",
+                            '标准差(m)': f"{stats.get('std', 0):.2f}"
+                        })
+                    if stats_data:
+                        st.dataframe(pd.DataFrame(stats_data), use_container_width=True)
+
+                # 方法分布图
+                st.subheader("各层插值方法分布")
+                method_counts = {}
+                if hasattr(predictor, 'layer_data'):
+                    for layer_name, data in predictor.layer_data.items():
+                        method = data.get('method', 'unknown')
+                        method_counts[method] = method_counts.get(method, 0) + 1
+                elif hasattr(predictor, 'predictors'):
+                    for layer_name, pred_info in predictor.predictors.items():
+                        method = pred_info.get('type', 'unknown')
+                        method_counts[method] = method_counts.get(method, 0) + 1
+
+                if method_counts:
+                    fig = go.Figure(data=[go.Pie(
+                        labels=list(method_counts.keys()),
+                        values=list(method_counts.values()),
+                        hole=0.4,
+                        marker_colors=['#E64B35', '#4DBBD5', '#00A087', '#3C5488']
+                    )])
+                    fig.update_layout(
+                        title="各层使用的插值方法",
+                        height=350
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+
+                st.success("✅ 传统方法无需迭代训练，可直接进行三维建模!")
+
             # K-fold结果显示
-            if st.session_state.get('use_kfold', False) and st.session_state.get('cv_results') is not None:
+            elif st.session_state.get('use_kfold', False) and st.session_state.get('cv_results') is not None:
                 cv_results = st.session_state.cv_results
 
                 st.subheader("K-Fold交叉验证结果")
@@ -693,12 +893,15 @@ def main():
     with tab3:
         st.header("三维地质模型构建")
 
-        if st.session_state.model is None:
+        # 检查是否有可用的预测模型（传统或GNN）
+        has_traditional = st.session_state.get('use_traditional_method', False) and st.session_state.get('traditional_predictor') is not None
+        has_gnn = st.session_state.model is not None
+
+        if not has_traditional and not has_gnn:
             st.warning("⚠️ 请先在【模型训练】页面训练模型")
             st.stop()
 
         result = st.session_state.data_result
-        model = st.session_state.model
 
         col1, col2 = st.columns([1, 2])
 
@@ -707,6 +910,11 @@ def main():
             st.write(f"**网格分辨率:** {resolution}×{resolution}")
             st.write(f"**基准面高程:** {base_level} m")
             st.write(f"**层间间隙:** {gap_value} m")
+
+            if has_traditional:
+                st.info("使用传统地质统计学方法预测厚度")
+            else:
+                st.info("使用GNN深度学习方法预测厚度")
 
             if st.button("🏗️ 构建三维模型", type="primary"):
                 with st.spinner("正在构建模型..."):
@@ -720,48 +928,55 @@ def main():
                         grid_x = np.linspace(x_range[0], x_range[1], resolution)
                         grid_y = np.linspace(y_range[0], y_range[1], resolution)
 
-                        # GNN预测厚度
-                        device = next(model.parameters()).device
-                        model.eval()
-                        data = result['data'].to(device)
+                        if has_traditional:
+                            # ===== 使用传统方法预测厚度 =====
+                            predictor = st.session_state.traditional_predictor
+                            thickness_grids = predictor.predict_grid(grid_x, grid_y)
+                            XI, YI = np.meshgrid(grid_x, grid_y)
+                        else:
+                            # ===== 使用GNN预测厚度 =====
+                            model = st.session_state.model
+                            device = next(model.parameters()).device
+                            model.eval()
+                            data = result['data'].to(device)
 
-                        with torch.no_grad():
-                            pred_thick, pred_exist = model(
-                                data.x, data.edge_index,
-                                data.edge_attr if hasattr(data, 'edge_attr') else None
-                            )
-                            pred_thick = pred_thick.cpu().numpy()
-                            pred_exist = torch.sigmoid(pred_exist).cpu().numpy()
-
-                        # 插值到网格
-                        from scipy.interpolate import griddata
-                        XI, YI = np.meshgrid(grid_x, grid_y)
-                        xi_flat, yi_flat = XI.flatten(), YI.flatten()
-
-                        thickness_grids = {}
-                        for i, layer_name in enumerate(result['layer_order']):
-                            layer_thick = pred_thick[:, i]
-                            exist_mask = pred_exist[:, i] > 0.5
-                            if exist_mask.sum() < 3:
-                                exist_mask = np.ones(len(layer_thick), dtype=bool)
-
-                            x_valid = coords[exist_mask, 0]
-                            y_valid = coords[exist_mask, 1]
-                            z_valid = layer_thick[exist_mask]
-
-                            grid_thick = griddata(
-                                (x_valid, y_valid), z_valid, (xi_flat, yi_flat),
-                                method='linear'
-                            )
-                            if np.any(np.isnan(grid_thick)):
-                                nearest = griddata(
-                                    (x_valid, y_valid), z_valid, (xi_flat, yi_flat),
-                                    method='nearest'
+                            with torch.no_grad():
+                                pred_thick, pred_exist = model(
+                                    data.x, data.edge_index,
+                                    data.edge_attr if hasattr(data, 'edge_attr') else None
                                 )
-                                grid_thick = np.where(np.isnan(grid_thick), nearest, grid_thick)
+                                pred_thick = pred_thick.cpu().numpy()
+                                pred_exist = torch.sigmoid(pred_exist).cpu().numpy()
 
-                            grid_thick = np.clip(grid_thick, 0.5, None)
-                            thickness_grids[layer_name] = grid_thick.reshape(XI.shape)
+                            # 插值到网格
+                            from scipy.interpolate import griddata
+                            XI, YI = np.meshgrid(grid_x, grid_y)
+                            xi_flat, yi_flat = XI.flatten(), YI.flatten()
+
+                            thickness_grids = {}
+                            for i, layer_name in enumerate(result['layer_order']):
+                                layer_thick = pred_thick[:, i]
+                                exist_mask = pred_exist[:, i] > 0.5
+                                if exist_mask.sum() < 3:
+                                    exist_mask = np.ones(len(layer_thick), dtype=bool)
+
+                                x_valid = coords[exist_mask, 0]
+                                y_valid = coords[exist_mask, 1]
+                                z_valid = layer_thick[exist_mask]
+
+                                grid_thick = griddata(
+                                    (x_valid, y_valid), z_valid, (xi_flat, yi_flat),
+                                    method='linear'
+                                )
+                                if np.any(np.isnan(grid_thick)):
+                                    nearest = griddata(
+                                        (x_valid, y_valid), z_valid, (xi_flat, yi_flat),
+                                        method='nearest'
+                                    )
+                                    grid_thick = np.where(np.isnan(grid_thick), nearest, grid_thick)
+
+                                grid_thick = np.clip(grid_thick, 0.5, None)
+                                thickness_grids[layer_name] = grid_thick.reshape(XI.shape)
 
                         # 层序累加构建模型
                         builder = GeologicalModelBuilder(

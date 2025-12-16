@@ -105,10 +105,20 @@ class GNNThicknessPredictor(nn.Module):
     ):
         super().__init__()
 
+        # 确保 hidden_channels 能被 heads 整除
+        if hidden_channels % heads != 0:
+            old_hidden = hidden_channels
+            hidden_channels = (hidden_channels // heads) * heads
+            if hidden_channels < 64:
+                hidden_channels = 64
+            warnings.warn(f"hidden_channels {old_hidden} 不能被 heads {heads} 整除，"
+                         f"已自动调整为 {hidden_channels}")
+
         self.num_layers = num_layers
         self.num_output_layers = num_output_layers
         self.dropout = dropout
         self.conv_type = conv_type
+        self.hidden_channels = hidden_channels
 
         # 输入投影层
         self.input_proj = nn.Sequential(
@@ -189,25 +199,26 @@ class GNNThicknessPredictor(nn.Module):
 
 class ThicknessLoss(nn.Module):
     """
-    厚度预测联合损失函数
+    厚度预测损失函数 - 针对地质数据优化
 
-    组合损失 = 厚度损失 + 存在性BCE损失 + 空间平滑正则化
-    使用Huber Loss对异常值更鲁棒
+    关键改进：
+    1. 使用对数空间计算误差（处理0.5m~70m的大范围）
+    2. 相对误差而非绝对误差
+    3. 降低存在性损失权重
     """
 
     def __init__(
         self,
         thick_weight: float = 1.0,
-        exist_weight: float = 0.3,
-        smooth_weight: float = 0.05,
-        huber_delta: float = 2.0  # Huber损失阈值
+        exist_weight: float = 0.1,  # 降低存在性损失权重
+        smooth_weight: float = 0.0,  # 关闭平滑正则化
+        huber_delta: float = 2.0
     ):
         super().__init__()
         self.thick_weight = thick_weight
         self.exist_weight = exist_weight
         self.smooth_weight = smooth_weight
         self.huber_delta = huber_delta
-        self.bce = nn.BCEWithLogitsLoss(reduction='none')
 
     def forward(
         self,
@@ -217,60 +228,42 @@ class ThicknessLoss(nn.Module):
         target_exist: torch.Tensor,
         mask: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
-        """
-        计算损失
-
-        Args:
-            pred_thick: 预测厚度 [N, L]
-            pred_exist: 存在性logits [N, L]
-            target_thick: 真实厚度 [N, L]
-            target_exist: 真实存在性 [N, L]（0或1）
-            mask: 有效位置掩码 [N, L]
-
-        Returns:
-            total_loss: 总损失
-            loss_dict: 各部分损失的字典
-        """
+        """计算损失"""
         if mask is None:
             mask = torch.ones_like(target_thick)
 
-        # 厚度Huber损失（仅在存在的层计算，对异常值更鲁棒）
+        # 仅在存在的层计算厚度损失
         thick_mask = mask * target_exist
-        thick_diff = (pred_thick - target_thick) * thick_mask
-        thick_loss = F.huber_loss(
-            pred_thick * thick_mask,
-            target_thick * thick_mask,
-            reduction='sum',
-            delta=self.huber_delta
+        valid_count = thick_mask.sum() + 1e-8
+
+        # 方法1：对数空间MSE（推荐）
+        # 将厚度映射到对数空间，使小厚度和大厚度的误差权重相当
+        eps = 0.1  # 防止log(0)
+        pred_log = torch.log(pred_thick + eps)
+        target_log = torch.log(target_thick + eps)
+        log_mse = ((pred_log - target_log) ** 2 * thick_mask).sum() / valid_count
+
+        # 方法2：相对误差（补充）
+        relative_error = (pred_thick - target_thick) / (target_thick + 1.0)
+        rel_mse = ((relative_error ** 2) * thick_mask).sum() / valid_count
+
+        # 组合厚度损失
+        thick_loss = 0.7 * log_mse + 0.3 * rel_mse
+
+        # 简化的存在性损失
+        exist_loss = F.binary_cross_entropy_with_logits(
+            pred_exist, target_exist, reduction='none'
         )
-        thick_loss = thick_loss / (thick_mask.sum() + 1e-8)
-
-        # 存在性BCE损失（加权处理类别不平衡）
-        pos_weight = (1 - target_exist.mean()) / (target_exist.mean() + 1e-8)
-        pos_weight = torch.clamp(pos_weight, 0.5, 2.0)  # 限制权重范围
-        exist_loss = self.bce(pred_exist, target_exist)
-        # 对存在的层给予更高权重
-        weight = target_exist * pos_weight + (1 - target_exist)
-        exist_loss = (exist_loss * mask * weight).sum() / (mask.sum() + 1e-8)
-
-        # 空间平滑正则化
-        smooth_loss = torch.tensor(0.0, device=pred_thick.device)
-        if self.smooth_weight > 0 and pred_thick.shape[0] > 1:
-            diff = pred_thick[1:] - pred_thick[:-1]
-            smooth_loss = (diff ** 2).mean()
+        exist_loss = (exist_loss * mask).mean()
 
         # 总损失
-        total_loss = (
-            self.thick_weight * thick_loss +
-            self.exist_weight * exist_loss +
-            self.smooth_weight * smooth_loss
-        )
+        total_loss = self.thick_weight * thick_loss + self.exist_weight * exist_loss
 
         loss_dict = {
             'total': total_loss.item(),
             'thick': thick_loss.item(),
             'exist': exist_loss.item(),
-            'smooth': smooth_loss.item()
+            'smooth': 0.0
         }
 
         return total_loss, loss_dict
