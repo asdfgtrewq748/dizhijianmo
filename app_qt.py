@@ -31,7 +31,8 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QComboBox, QSpinBox, QDoubleSpinBox,
     QGroupBox, QTextEdit, QProgressBar, QTabWidget, QCheckBox,
-    QSplitter, QSlider, QListWidget, QMessageBox, QFileDialog
+    QSplitter, QSlider, QListWidget, QMessageBox, QFileDialog,
+    QScrollArea, QFrame
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QFont, QTextCursor
@@ -58,7 +59,7 @@ from src.thickness_predictor_v2 import (
 )
 
 if PYVISTA_AVAILABLE:
-    from src.pyvista_renderer import GeologicalModelRenderer, RockMaterial
+    from src.pyvista_renderer import GeologicalModelRenderer, RockMaterial, TextureGenerator
 
 # FLAC3D导出器
 try:
@@ -334,6 +335,11 @@ class GeologicalModelingApp(QMainWindow):
         self.XI = None
         self.YI = None
         self.use_traditional = False
+        
+        # 渲染缓存
+        self.cached_meshes = {}
+        self.cached_textures = {} # 纹理缓存
+        self.cached_sides_state = None
 
         self.project_root = Path(__file__).parent
         self.data_dir = self.project_root / 'data'
@@ -341,29 +347,231 @@ class GeologicalModelingApp(QMainWindow):
         self.init_ui()
         self.check_gpu()
 
+    def apply_modern_style(self):
+        """应用现代深色主题样式"""
+        style_sheet = """
+        /* 全局样式 */
+        QMainWindow {
+            background-color: #1e1e2e;
+            color: #cdd6f4;
+        }
+        QWidget {
+            background-color: #1e1e2e;
+            color: #cdd6f4;
+            font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+            font-size: 14px;
+        }
+        
+        /* 滚动区域背景 */
+        QScrollArea {
+            background-color: #1e1e2e;
+            border: none;
+        }
+        QScrollArea > QWidget > QWidget {
+            background-color: #1e1e2e;
+        }
+        
+        /* 分组框 */
+        QGroupBox {
+            border: 2px solid #313244;
+            border-radius: 8px;
+            margin-top: 24px;
+            padding-top: 12px;
+            background-color: #252635;
+            font-weight: bold;
+        }
+        QGroupBox::title {
+            subcontrol-origin: margin;
+            subcontrol-position: top left;
+            padding: 6px 12px;
+            background-color: #313244;
+            border-top-left-radius: 8px;
+            border-top-right-radius: 8px;
+            color: #89b4fa;
+            font-size: 15px;
+        }
+
+        /* 按钮通用 */
+        QPushButton {
+            background-color: #45475a;
+            border: none;
+            border-radius: 6px;
+            padding: 10px 20px;
+            color: #ffffff;
+            font-weight: bold;
+            font-size: 14px;
+        }
+        QPushButton:hover {
+            background-color: #585b70;
+        }
+        QPushButton:pressed {
+            background-color: #313244;
+        }
+        QPushButton:disabled {
+            background-color: #313244;
+            color: #6c7086;
+        }
+
+        /* 主要操作按钮 (蓝色) */
+        QPushButton#primary {
+            background-color: #89b4fa;
+            color: #1e1e2e;
+        }
+        QPushButton#primary:hover {
+            background-color: #b4befe;
+        }
+        QPushButton#primary:pressed {
+            background-color: #74c7ec;
+        }
+
+        /* 成功/导出按钮 (绿色) */
+        QPushButton#success {
+            background-color: #a6e3a1;
+            color: #1e1e2e;
+        }
+        QPushButton#success:hover {
+            background-color: #94e2d5;
+        }
+
+        /* 输入控件 */
+        QComboBox, QSpinBox, QDoubleSpinBox, QTextEdit, QListWidget {
+            background-color: #313244;
+            border: 1px solid #45475a;
+            border-radius: 4px;
+            padding: 6px;
+            color: #cdd6f4;
+            selection-background-color: #585b70;
+            min-height: 20px;
+        }
+        QComboBox::drop-down {
+            border: none;
+            background: transparent;
+        }
+        QComboBox::down-arrow {
+            image: none;
+            border-left: 6px solid transparent;
+            border-right: 6px solid transparent;
+            border-top: 6px solid #cdd6f4;
+            margin-right: 8px;
+        }
+
+        /* 滚动条 */
+        QScrollBar:vertical {
+            border: none;
+            background: #1e1e2e;
+            width: 12px;
+            margin: 0px;
+        }
+        QScrollBar::handle:vertical {
+            background: #45475a;
+            min-height: 20px;
+            border-radius: 6px;
+        }
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+            height: 0px;
+        }
+
+        /* 进度条 */
+        QProgressBar {
+            border: none;
+            background-color: #313244;
+            border-radius: 4px;
+            text-align: center;
+            color: #cdd6f4;
+            min-height: 20px;
+        }
+        QProgressBar::chunk {
+            background-color: #89b4fa;
+            border-radius: 4px;
+        }
+
+        /* 分割器 */
+        QSplitter::handle {
+            background-color: #45475a;
+            width: 4px;
+        }
+        
+        /* 标签 */
+        QLabel {
+            color: #cdd6f4;
+            padding: 2px;
+        }
+        QLabel#header {
+            color: #89b4fa;
+            font-size: 18px;
+            font-weight: bold;
+            padding: 10px 0;
+        }
+        
+        /* 复选框 */
+        QCheckBox {
+            spacing: 10px;
+        }
+        QCheckBox::indicator {
+            width: 20px;
+            height: 20px;
+            border-radius: 4px;
+            border: 1px solid #45475a;
+            background-color: #313244;
+        }
+        QCheckBox::indicator:checked {
+            background-color: #89b4fa;
+            border-color: #89b4fa;
+        }
+        
+        /* 滑块 */
+        QSlider::groove:horizontal {
+            border: 1px solid #45475a;
+            height: 8px;
+            background: #313244;
+            margin: 2px 0;
+            border-radius: 4px;
+        }
+        QSlider::handle:horizontal {
+            background: #89b4fa;
+            border: 1px solid #89b4fa;
+            width: 20px;
+            height: 20px;
+            margin: -7px 0;
+            border-radius: 10px;
+        }
+        """
+        self.setStyleSheet(style_sheet)
+
     def init_ui(self):
         """初始化用户界面"""
+        self.apply_modern_style()
+        
         self.log_text = None
-        self.stats_label = None
+        self.stats_text = None
         self.progress_bar = None
 
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
 
         main_layout = QHBoxLayout(central_widget)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
         left_panel = self.create_control_panel()
         splitter.addWidget(left_panel)
 
+        center_panel = self.create_render_panel()
+        splitter.addWidget(center_panel)
+        
         right_panel = self.create_info_panel()
         splitter.addWidget(right_panel)
 
-        center_panel = self.create_render_panel()
-        splitter.addWidget(center_panel)
-
-        splitter.setSizes([300, 300, 900])
+        # 设置初始比例和伸缩因子
+        splitter.setSizes([320, 960, 320])
+        splitter.setStretchFactor(0, 0) # 左侧不自动伸缩
+        splitter.setStretchFactor(1, 1) # 中间自动伸缩
+        splitter.setStretchFactor(2, 0) # 右侧不自动伸缩
+        splitter.setCollapsible(0, False)
+        splitter.setCollapsible(2, False)
+        splitter.setHandleWidth(4)
 
         main_layout.addWidget(splitter)
 
@@ -371,16 +579,29 @@ class GeologicalModelingApp(QMainWindow):
 
     def create_control_panel(self) -> QWidget:
         """创建左侧控制面板"""
+        # 创建滚动区域容器
+        container = QWidget()
+        container_layout = QVBoxLayout(container)
+        container_layout.setContentsMargins(0, 0, 0, 0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        
         panel = QWidget()
         layout = QVBoxLayout(panel)
+        layout.setContentsMargins(15, 15, 15, 15)
+        layout.setSpacing(15)
 
         title = QLabel("⚙️ 参数设置")
-        title.setFont(QFont("Arial", 14, QFont.Weight.Bold))
+        title.setObjectName("header")
         layout.addWidget(title)
 
         # 数据配置
         data_group = QGroupBox("📊 数据配置")
         data_layout = QVBoxLayout()
+        data_layout.setSpacing(10)
 
         self.merge_coal_cb = QCheckBox("合并煤层")
         data_layout.addWidget(self.merge_coal_cb)
@@ -404,6 +625,7 @@ class GeologicalModelingApp(QMainWindow):
         data_layout.addWidget(self.min_occurrence_spin)
 
         self.load_btn = QPushButton("🔄 加载数据")
+        self.load_btn.setObjectName("primary")
         self.load_btn.clicked.connect(self.load_data)
         data_layout.addWidget(self.load_btn)
 
@@ -413,6 +635,7 @@ class GeologicalModelingApp(QMainWindow):
         # 预测方法
         method_group = QGroupBox("🔧 预测方法")
         method_layout = QVBoxLayout()
+        method_layout.setSpacing(10)
 
         self.traditional_radio = QCheckBox("传统方法 (IDW/Kriging)")
         self.traditional_radio.setChecked(True)
@@ -421,6 +644,7 @@ class GeologicalModelingApp(QMainWindow):
 
         self.traditional_params = QWidget()
         trad_layout = QVBoxLayout(self.traditional_params)
+        trad_layout.setContentsMargins(0, 0, 0, 0)
         trad_layout.addWidget(QLabel("插值方法:"))
         self.interp_method_combo = QComboBox()
         self.interp_method_combo.addItems(['idw', 'kriging', 'hybrid'])
@@ -433,6 +657,7 @@ class GeologicalModelingApp(QMainWindow):
 
         self.gnn_params = QWidget()
         gnn_layout = QVBoxLayout(self.gnn_params)
+        gnn_layout.setContentsMargins(0, 0, 0, 0)
 
         self.auto_config_cb = QCheckBox("自动优化配置")
         self.auto_config_cb.setChecked(True)
@@ -449,6 +674,7 @@ class GeologicalModelingApp(QMainWindow):
         method_layout.addWidget(self.gnn_params)
 
         self.train_btn = QPushButton("🚀 开始训练")
+        self.train_btn.setObjectName("primary")
         self.train_btn.clicked.connect(self.train_model)
         self.train_btn.setEnabled(False)
         method_layout.addWidget(self.train_btn)
@@ -459,6 +685,7 @@ class GeologicalModelingApp(QMainWindow):
         # 建模配置
         modeling_group = QGroupBox("🗺️ 建模配置")
         modeling_layout = QVBoxLayout()
+        modeling_layout.setSpacing(10)
 
         modeling_layout.addWidget(QLabel("网格分辨率:"))
         self.resolution_spin = QSpinBox()
@@ -472,6 +699,7 @@ class GeologicalModelingApp(QMainWindow):
         modeling_layout.addWidget(self.base_level_spin)
 
         self.model_btn = QPushButton("🏗️ 构建三维模型")
+        self.model_btn.setObjectName("primary")
         self.model_btn.clicked.connect(self.build_3d_model)
         self.model_btn.setEnabled(False)
         modeling_layout.addWidget(self.model_btn)
@@ -482,6 +710,7 @@ class GeologicalModelingApp(QMainWindow):
         # 渲染控制
         render_group = QGroupBox("🎨 渲染控制")
         render_layout = QVBoxLayout()
+        render_layout.setSpacing(10)
 
         render_layout.addWidget(QLabel("显示地层:"))
         self.layer_list = QListWidget()
@@ -492,7 +721,7 @@ class GeologicalModelingApp(QMainWindow):
 
         render_layout.addWidget(QLabel("渲染模式:"))
         self.render_mode_combo = QComboBox()
-        self.render_mode_combo.addItems(['增强材质', '基础渲染', '线框模式'])
+        self.render_mode_combo.addItems(['真实纹理', '增强材质', '基础渲染', '线框模式'])
         self.render_mode_combo.currentTextChanged.connect(self.on_render_mode_changed)
         render_layout.addWidget(self.render_mode_combo)
 
@@ -510,6 +739,11 @@ class GeologicalModelingApp(QMainWindow):
         self.show_sides_cb.stateChanged.connect(self.on_sides_toggled)
         render_layout.addWidget(self.show_sides_cb)
 
+        self.show_edges_cb = QCheckBox("显示网格")
+        self.show_edges_cb.setChecked(False)
+        self.show_edges_cb.stateChanged.connect(self.refresh_render)
+        render_layout.addWidget(self.show_edges_cb)
+
         self.show_boreholes_cb = QCheckBox("显示钻孔")
         self.show_boreholes_cb.setChecked(False)
         self.show_boreholes_cb.stateChanged.connect(self.on_boreholes_toggled)
@@ -525,64 +759,81 @@ class GeologicalModelingApp(QMainWindow):
         # 导出
         export_group = QGroupBox("💾 导出")
         export_layout = QVBoxLayout()
+        export_layout.setSpacing(10)
 
         self.export_png_btn = QPushButton("PNG截图")
+        self.export_png_btn.setObjectName("success")
         self.export_png_btn.clicked.connect(lambda: self.export_model('png'))
         self.export_png_btn.setEnabled(False)
         export_layout.addWidget(self.export_png_btn)
 
         self.export_html_btn = QPushButton("HTML交互")
+        self.export_html_btn.setObjectName("success")
         self.export_html_btn.clicked.connect(lambda: self.export_model('html'))
         self.export_html_btn.setEnabled(False)
         export_layout.addWidget(self.export_html_btn)
 
         self.export_obj_btn = QPushButton("OBJ模型")
+        self.export_obj_btn.setObjectName("success")
         self.export_obj_btn.clicked.connect(lambda: self.export_model('obj'))
         self.export_obj_btn.setEnabled(False)
         export_layout.addWidget(self.export_obj_btn)
 
         self.export_stl_btn = QPushButton("STL模型")
+        self.export_stl_btn.setObjectName("success")
         self.export_stl_btn.clicked.connect(lambda: self.export_model('stl'))
         self.export_stl_btn.setEnabled(False)
         export_layout.addWidget(self.export_stl_btn)
 
         self.export_vtk_btn = QPushButton("VTK模型")
+        self.export_vtk_btn.setObjectName("success")
         self.export_vtk_btn.clicked.connect(lambda: self.export_model('vtk'))
         self.export_vtk_btn.setEnabled(False)
         export_layout.addWidget(self.export_vtk_btn)
 
         self.export_flac3d_btn = QPushButton("FLAC3D网格")
+        self.export_flac3d_btn.setObjectName("success")
         self.export_flac3d_btn.clicked.connect(lambda: self.export_model('flac3d'))
         self.export_flac3d_btn.setEnabled(False)
-        self.export_flac3d_btn.setStyleSheet("QPushButton { background-color: #4CAF50; color: white; font-weight: bold; }")
         export_layout.addWidget(self.export_flac3d_btn)
 
         export_group.setLayout(export_layout)
         layout.addWidget(export_group)
 
         layout.addStretch()
+        
+        scroll.setWidget(panel)
+        container_layout.addWidget(scroll)
 
-        return panel
+        return container
 
     def create_render_panel(self) -> QWidget:
         """创建中央3D渲染面板"""
         panel = QWidget()
         layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
-        title = QLabel("🎨 三维模型渲染 (GPU加速)")
-        title.setFont(QFont("Arial", 14, QFont.Weight.Bold))
-        layout.addWidget(title)
+        header = QWidget()
+        header.setStyleSheet("background-color: #252635; border-bottom: 1px solid #45475a;")
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(10, 5, 10, 5)
+        title = QLabel("🎨 三维视图")
+        title.setStyleSheet("font-weight: bold; color: #cdd6f4;")
+        header_layout.addWidget(title)
+        header_layout.addStretch()
+        layout.addWidget(header)
 
         if PYVISTA_AVAILABLE:
             self.plotter = QtInteractor(panel)
-            self.plotter.set_background('white')
+            self.plotter.set_background('#181825') # 深色背景
             layout.addWidget(self.plotter.interactor)
             self.plotter.add_axes()
             self.log("✓ PyVista GPU渲染器已启用")
         else:
             placeholder = QLabel("⚠️ PyVista未安装\n请运行: pip install pyvistaqt")
             placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            placeholder.setStyleSheet("font-size: 16px; color: red;")
+            placeholder.setStyleSheet("font-size: 16px; color: #f38ba8;")
             layout.addWidget(placeholder)
             self.plotter = None
 
@@ -592,14 +843,29 @@ class GeologicalModelingApp(QMainWindow):
         """创建右侧信息面板"""
         panel = QWidget()
         layout = QVBoxLayout(panel)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(15)
 
         title = QLabel("📊 统计与日志")
-        title.setFont(QFont("Arial", 14, QFont.Weight.Bold))
+        title.setObjectName("header")
         layout.addWidget(title)
 
-        self.stats_label = QLabel("等待加载数据...")
-        self.stats_label.setWordWrap(True)
-        layout.addWidget(self.stats_label)
+        # 使用 QTextEdit 替换 QLabel 以支持滚动，防止内容过多撑爆窗口
+        self.stats_text = QTextEdit()
+        self.stats_text.setReadOnly(True)
+        self.stats_text.setPlaceholderText("等待加载数据...")
+        self.stats_text.setStyleSheet("""
+            QTextEdit {
+                color: #a6adc8; 
+                background-color: #313244; 
+                padding: 8px; 
+                border-radius: 6px; 
+                border: 1px solid #45475a;
+                font-family: "Consolas", "Microsoft YaHei";
+                font-size: 13px;
+            }
+        """)
+        layout.addWidget(self.stats_text, 1) # 权重1
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
@@ -608,8 +874,17 @@ class GeologicalModelingApp(QMainWindow):
         layout.addWidget(QLabel("控制台输出:"))
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
-        self.log_text.setStyleSheet("background-color: #f0f0f0; font-family: Consolas;")
-        layout.addWidget(self.log_text)
+        self.log_text.setStyleSheet("""
+            QTextEdit {
+                color: #cdd6f4;
+                background-color: #181825;
+                border: 1px solid #45475a;
+                border-radius: 6px;
+                font-family: "Consolas", monospace;
+                font-size: 12px;
+            }
+        """)
+        layout.addWidget(self.log_text, 2) # 权重2，给日志更多空间
 
         return panel
 
@@ -688,7 +963,7 @@ class GeologicalModelingApp(QMainWindow):
         for i, layer in enumerate(result['layer_order']):
             stats += f"{i+1}. {layer} ({result['exist_rate'][i]*100:.0f}%)\n"
 
-        self.stats_label.setText(stats)
+        self.stats_text.setText(stats)
         self.log("✓ 数据加载完成，可以开始训练")
 
     def train_model(self):
@@ -863,6 +1138,11 @@ class GeologicalModelingApp(QMainWindow):
         self.block_models = block_models
         self.XI = XI
         self.YI = YI
+        
+        # 清空渲染缓存
+        self.cached_meshes = {}
+        self.cached_textures = {}
+        self.cached_sides_state = None
 
         self.model_btn.setEnabled(True)
         self.progress_bar.setVisible(False)
@@ -890,12 +1170,21 @@ class GeologicalModelingApp(QMainWindow):
 
     def render_3d_model(self):
         """渲染3D模型到PyVista窗口"""
-        self.log("正在渲染3D模型...")
+        # self.log("正在渲染3D模型...") # 减少日志刷屏
 
         try:
+            # 保存当前相机视角
+            camera_pos = self.plotter.camera_position if self.plotter.camera_set else None
+
             self.plotter.clear()
+            self.plotter.set_background('#181825') # 确保背景色保持深色
+            
+            # 启用高级渲染特性
+            self.plotter.enable_anti_aliasing()
+            self.plotter.enable_depth_peeling() # 改善透明度渲染
 
             show_sides = self.show_sides_cb.isChecked() if hasattr(self, 'show_sides_cb') else True
+            show_edges = self.show_edges_cb.isChecked() if hasattr(self, 'show_edges_cb') else False
             opacity = self.opacity_slider.value() / 100.0 if hasattr(self, 'opacity_slider') else 0.9
             render_mode = self.render_mode_combo.currentText() if hasattr(self, 'render_mode_combo') else '基础渲染'
 
@@ -908,45 +1197,128 @@ class GeologicalModelingApp(QMainWindow):
 
             renderer = GeologicalModelRenderer(use_pbr=(render_mode=='增强材质'))
 
-            for i, bm in enumerate(self.block_models):
-                if bm.name not in selected_layers:
+            # 添加灯光以增强立体感 (移除EDL以消除阴影干扰)
+            if render_mode in ['增强材质', '真实纹理']:
+                # self.plotter.enable_eye_dome_lighting()  # 用户反馈阴影干扰观察，故禁用
+                self.plotter.add_light(pv.Light(position=(0, 0, 1000), intensity=0.8))
+                self.plotter.add_light(pv.Light(position=(1000, 1000, 1000), intensity=0.5))
+
+            # 检查是否需要重新生成网格缓存
+            if not self.cached_meshes or self.cached_sides_state != show_sides:
+                self.log("正在生成网格几何体...")
+                self.cached_meshes = {}
+                for i, bm in enumerate(self.block_models):
+                    color = RockMaterial.get_color(bm.name, i)
+                    mesh = renderer.create_layer_mesh(
+                        self.XI, self.YI,
+                        bm.top_surface, bm.bottom_surface,
+                        bm.name,
+                        color=color,
+                        add_sides=show_sides
+                    )
+                    
+                    # 为纹理映射添加UV坐标
+                    if render_mode == '真实纹理':
+                        try:
+                            # 简单的平面投影映射
+                            mesh.texture_map_to_plane(origin=mesh.center, normal=(0, 0, 1), inplace=True)
+                        except:
+                            pass
+                            
+                    self.cached_meshes[bm.name] = (mesh, color)
+                self.cached_sides_state = show_sides
+
+            # 使用缓存的网格进行渲染
+            for bm in self.block_models:
+                # if bm.name not in selected_layers:
+                #     continue
+                
+                if bm.name not in self.cached_meshes:
                     continue
 
-                color = RockMaterial.get_color(bm.name, i)
-
-                mesh = renderer.create_layer_mesh(
-                    self.XI, self.YI,
-                    bm.top_surface, bm.bottom_surface,
-                    bm.name,
-                    color=color,
-                    add_sides=show_sides
-                )
+                mesh, color = self.cached_meshes[bm.name]
+                
+                # 智能透明度控制：选中的层使用滑块透明度，未选中的层极度透明作为背景
+                is_selected = bm.name in selected_layers
+                if is_selected:
+                    layer_opacity = opacity
+                else:
+                    layer_opacity = 0.05 # 背景层透明度 (5%)
 
                 if render_mode == '线框模式':
                     self.plotter.add_mesh(
                         mesh,
                         color=color,
                         style='wireframe',
-                        line_width=2,
-                        opacity=opacity * 0.5,
+                        line_width=2 if is_selected else 1,
+                        opacity=layer_opacity * 0.5,
+                        name=bm.name
+                    )
+                elif render_mode == '真实纹理':
+                    # 纹理贴图模式
+                    if bm.name not in self.cached_textures:
+                        # 生成纹理
+                        tex_arr = TextureGenerator.generate_rock_texture(bm.name, size=(512, 512))
+                        self.cached_textures[bm.name] = pv.Texture(tex_arr)
+                    
+                    texture = self.cached_textures[bm.name]
+                    
+                    # 确保网格有纹理坐标，如果没有则重新映射
+                    if not mesh.active_t_coords:
+                         mesh.texture_map_to_plane(origin=mesh.center, normal=(0, 0, 1), inplace=True)
+
+                    self.plotter.add_mesh(
+                        mesh,
+                        texture=texture,
+                        opacity=layer_opacity,
+                        smooth_shading=True,
+                        show_edges=show_edges and is_selected, # 仅选中的层显示网格
+                        edge_color='#000000',
+                        line_width=1,
+                        name=bm.name
+                    )
+
+                elif render_mode == '增强材质':
+                    # 获取PBR参数
+                    pbr_params = RockMaterial.get_pbr_params(bm.name)
+                    self.plotter.add_mesh(
+                        mesh,
+                        color=color,
+                        opacity=layer_opacity,
+                        smooth_shading=True,
+                        pbr=True,
+                        metallic=pbr_params.get('metallic', 0.1),
+                        roughness=pbr_params.get('roughness', 0.6),
+                        diffuse=0.8,
+                        specular=0.5,
+                        show_edges=show_edges and is_selected,
+                        edge_color='#000000',
+                        line_width=1,
                         name=bm.name
                     )
                 else:
                     self.plotter.add_mesh(
                         mesh,
                         color=color,
-                        opacity=opacity,
+                        opacity=layer_opacity,
                         smooth_shading=True,
+                        show_edges=show_edges and is_selected,
+                        edge_color='#000000',
+                        line_width=1,
                         name=bm.name
                     )
 
             if hasattr(self, 'show_boreholes_cb') and self.show_boreholes_cb.isChecked():
                 self.add_borehole_markers()
 
-            self.plotter.reset_camera()
-            self.plotter.view_isometric()
+            # 恢复相机视角或重置
+            if camera_pos:
+                self.plotter.camera_position = camera_pos
+            else:
+                self.plotter.reset_camera()
+                self.plotter.view_isometric()
 
-            self.log("✓ 3D模型渲染完成 (GPU加速)")
+            # self.log("✓ 3D模型渲染完成")
 
         except Exception as e:
             import traceback
@@ -954,43 +1326,52 @@ class GeologicalModelingApp(QMainWindow):
 
     def add_borehole_markers(self):
         """添加钻孔位置标记"""
-        if self.data_result is None:
+        if self.data_result is None or self.block_models is None:
             return
 
         try:
             coords = self.data_result['borehole_coords']
             borehole_ids = self.data_result['borehole_ids']
 
-            z_top = max(bm.top_surface.max() for bm in self.block_models) + 10
+            # 计算模型整体高度范围
+            z_max = max(bm.top_surface.max() for bm in self.block_models)
+            z_min = min(bm.bottom_surface.min() for bm in self.block_models)
+            height = z_max - z_min
+            center_z = (z_max + z_min) / 2
 
-            points = np.column_stack([
-                coords[:, 0],
-                coords[:, 1],
-                np.full(len(coords), z_top)
-            ])
-
-            point_cloud = pv.PolyData(points)
-
-            self.plotter.add_mesh(
-                point_cloud,
-                color='red',
-                point_size=15,
-                render_points_as_spheres=True,
-                name='boreholes'
-            )
-
+            # 钻孔参数
+            radius = 2.5  # 直径5m -> 半径2.5m
+            
             for i, (x, y) in enumerate(coords):
+                # 创建圆柱体
+                cylinder = pv.Cylinder(
+                    center=(x, y, center_z),
+                    direction=(0, 0, 1),
+                    radius=radius,
+                    height=height,
+                    resolution=20
+                )
+                
+                self.plotter.add_mesh(
+                    cylinder,
+                    color='#ff5555',
+                    opacity=0.3, # 高透明度
+                    smooth_shading=True,
+                    name=f'borehole_cyl_{i}'
+                )
+
+                # 添加顶部标签
                 self.plotter.add_point_labels(
-                    [[x, y, z_top + 5]],
+                    [[x, y, z_max + 5]],
                     [borehole_ids[i]],
-                    font_size=10,
-                    text_color='black',
-                    shape_color='white',
-                    shape_opacity=0.7,
+                    font_size=14,
+                    text_color='#cdd6f4',
+                    shape_color='#313244',
+                    shape_opacity=0.8,
                     name=f'label_{i}'
                 )
 
-            self.log(f"✓ 已添加 {len(coords)} 个钻孔标记")
+            # self.log(f"✓ 已添加 {len(coords)} 个钻孔标记")
 
         except Exception as e:
             self.log(f"添加钻孔标记失败: {str(e)}")
@@ -1194,7 +1575,7 @@ def main():
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
     window = GeologicalModelingApp()
-    window.show()
+    window.showMaximized() # 默认最大化启动
     sys.exit(app.exec())
 
 
