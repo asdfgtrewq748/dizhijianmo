@@ -21,6 +21,8 @@ GNN地质建模系统 - PyQt6高性能增强版
 
 import sys
 import os
+import json
+import logging
 import numpy as np
 import torch
 from pathlib import Path
@@ -32,10 +34,11 @@ from PyQt6.QtWidgets import (
     QPushButton, QLabel, QComboBox, QSpinBox, QDoubleSpinBox,
     QGroupBox, QTextEdit, QProgressBar, QTabWidget, QCheckBox,
     QSplitter, QSlider, QListWidget, QMessageBox, QFileDialog,
-    QScrollArea, QFrame, QDialog, QTableWidget, QTableWidgetItem, QHeaderView
+    QScrollArea, QFrame, QDialog, QTableWidget, QTableWidgetItem, QHeaderView,
+    QMenuBar, QMenu
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
-from PyQt6.QtGui import QFont, QTextCursor
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QSettings
+from PyQt6.QtGui import QFont, QTextCursor, QAction, QCloseEvent
 
 # PyVista + Qt集成
 try:
@@ -58,6 +61,15 @@ from src.thickness_predictor_v2 import (
     PerLayerThicknessPredictor, HybridThicknessPredictor, evaluate_predictor
 )
 
+# Refactored GUI modules
+from src.gui.workers import (
+    DataLoaderThread, TrainingThread, 
+    TraditionalPredictorThread, ModelingThread
+)
+from src.gui.dialogs import BoreholeInfoDialog
+from src.gui.styles import MODERN_STYLE
+from src.gui.utils import setup_logging, global_exception_hook
+
 if PYVISTA_AVAILABLE:
     from src.pyvista_renderer import GeologicalModelRenderer, RockMaterial, TextureGenerator
 
@@ -74,304 +86,15 @@ except ImportError:
 # 工作线程 - 多线程处理，避免UI阻塞
 # =============================================================================
 
-class DataLoaderThread(QThread):
-    """数据加载线程"""
-    progress = pyqtSignal(str)
-    finished = pyqtSignal(dict)
-    error = pyqtSignal(str)
+# Threads have been moved to src/gui/workers.py
 
-    def __init__(self, data_dir, merge_coal, k_neighbors, layer_method, min_occurrence_rate):
-        super().__init__()
-        self.data_dir = data_dir
-        self.merge_coal = merge_coal
-        self.k_neighbors = k_neighbors
-        self.layer_method = layer_method
-        self.min_occurrence_rate = min_occurrence_rate
-
-    def run(self):
-        try:
-            self.progress.emit("正在加载钻孔数据...")
-            processor = ThicknessDataProcessor(
-                merge_coal=self.merge_coal,
-                k_neighbors=self.k_neighbors,
-                graph_type='knn'
-            )
-            result = processor.process_directory(
-                self.data_dir,
-                layer_method=self.layer_method,
-                min_occurrence_rate=self.min_occurrence_rate
-            )
-            self.progress.emit(f"✓ 数据加载完成: {len(result['borehole_ids'])} 个钻孔, {result['num_layers']} 个地层")
-            self.finished.emit(result)
-        except Exception as e:
-            self.error.emit(f"数据加载失败: {str(e)}")
-
-
-class TrainingThread(QThread):
-    """模型训练线程"""
-    progress = pyqtSignal(str)
-    epoch_update = pyqtSignal(int, float, float)
-    finished = pyqtSignal(object, object)
-    error = pyqtSignal(str)
-
-    def __init__(self, data_result, config):
-        super().__init__()
-        self.data_result = data_result
-        self.config = config
-
-    def run(self):
-        try:
-            self.progress.emit("正在初始化模型...")
-
-            n_features = self.config['num_features']
-            n_layers = self.config['num_layers']
-
-            model, trainer = create_trainer(
-                num_features=n_features,
-                num_layers=n_layers,
-                hidden_channels=self.config['hidden_dim'],
-                gnn_layers=self.config['gnn_layers'],
-                dropout=self.config['dropout'],
-                conv_type=self.config['conv_type'],
-                learning_rate=self.config['learning_rate'],
-                use_augmentation=self.config.get('use_augmentation', False),
-                scheduler_type='plateau',
-                heads=self.config.get('heads', 4)
-            )
-
-            self.progress.emit("开始训练...")
-
-            history = trainer.train(
-                data=self.data_result['data'],
-                epochs=self.config['epochs'],
-                patience=self.config['patience'],
-                warmup_epochs=self.config.get('warmup_epochs', 0),
-                verbose=False
-            )
-
-            self.progress.emit("✓ 训练完成!")
-            self.finished.emit(model, history)
-
-        except Exception as e:
-            import traceback
-            self.error.emit(f"训练失败: {str(e)}\n{traceback.format_exc()}")
-
-
-class TraditionalPredictorThread(QThread):
-    """传统方法拟合线程"""
-    progress = pyqtSignal(str)
-    finished = pyqtSignal(object, dict)
-    error = pyqtSignal(str)
-
-    def __init__(self, data_result, interp_method):
-        super().__init__()
-        self.data_result = data_result
-        self.interp_method = interp_method
-
-    def run(self):
-        try:
-            self.progress.emit("正在拟合传统模型...")
-
-            raw_df = self.data_result['raw_df']
-            layer_order = self.data_result['layer_order']
-
-            if self.interp_method == 'hybrid':
-                predictor = HybridThicknessPredictor(
-                    layer_order=layer_order,
-                    kriging_threshold=10,
-                    smooth_factor=0.3,
-                    min_thickness=0.5
-                )
-            else:
-                predictor = PerLayerThicknessPredictor(
-                    layer_order=layer_order,
-                    default_method=self.interp_method,
-                    idw_power=2.0,
-                    n_neighbors=8,
-                    min_thickness=0.5
-                )
-
-            predictor.fit(
-                raw_df,
-                x_col='x',
-                y_col='y',
-                layer_col='layer_name',
-                thickness_col='thickness'
-            )
-
-            coords = self.data_result['borehole_coords']
-            x_range = (coords[:, 0].min(), coords[:, 0].max())
-            y_range = (coords[:, 1].min(), coords[:, 1].max())
-            grid_x = np.linspace(x_range[0], x_range[1], 30)
-            grid_y = np.linspace(y_range[0], y_range[1], 30)
-
-            eval_metrics = evaluate_predictor(
-                predictor, raw_df, grid_x, grid_y,
-                x_col='x', y_col='y',
-                layer_col='layer_name',
-                thickness_col='thickness'
-            )
-
-            self.progress.emit("✓ 传统方法拟合完成!")
-            self.finished.emit(predictor, eval_metrics)
-
-        except Exception as e:
-            import traceback
-            self.error.emit(f"拟合失败: {str(e)}\n{traceback.format_exc()}")
-
-
-class ModelingThread(QThread):
-    """三维建模线程"""
-    progress = pyqtSignal(str)
-    finished = pyqtSignal(list, object, object)
-    error = pyqtSignal(str)
-
-    def __init__(self, data_result, predictor, resolution, base_level, gap_value, use_traditional):
-        super().__init__()
-        self.data_result = data_result
-        self.predictor = predictor
-        self.resolution = resolution
-        self.base_level = base_level
-        self.gap_value = gap_value
-        self.use_traditional = use_traditional
-
-    def run(self):
-        try:
-            self.progress.emit("正在生成网格...")
-
-            coords = self.data_result['borehole_coords']
-            x_range = (coords[:, 0].min(), coords[:, 0].max())
-            y_range = (coords[:, 1].min(), coords[:, 1].max())
-
-            grid_x = np.linspace(x_range[0], x_range[1], self.resolution)
-            grid_y = np.linspace(y_range[0], y_range[1], self.resolution)
-
-            if self.use_traditional:
-                thickness_grids = self.predictor.predict_grid(grid_x, grid_y)
-                XI, YI = np.meshgrid(grid_x, grid_y)
-            else:
-                model = self.predictor
-                device = next(model.parameters()).device
-                model.eval()
-                data = self.data_result['data'].to(device)
-
-                with torch.no_grad():
-                    pred_thick, pred_exist = model(
-                        data.x, data.edge_index,
-                        data.edge_attr if hasattr(data, 'edge_attr') else None
-                    )
-                    pred_thick = pred_thick.cpu().numpy()
-                    pred_exist = torch.sigmoid(pred_exist).cpu().numpy()
-
-                from scipy.interpolate import griddata
-                XI, YI = np.meshgrid(grid_x, grid_y)
-                xi_flat, yi_flat = XI.flatten(), YI.flatten()
-
-                thickness_grids = {}
-                for i, layer_name in enumerate(self.data_result['layer_order']):
-                    layer_thick = pred_thick[:, i]
-                    exist_mask = pred_exist[:, i] > 0.5
-                    if exist_mask.sum() < 3:
-                        exist_mask = np.ones(len(layer_thick), dtype=bool)
-
-                    x_valid = coords[exist_mask, 0]
-                    y_valid = coords[exist_mask, 1]
-                    z_valid = layer_thick[exist_mask]
-
-                    grid_thick = griddata(
-                        (x_valid, y_valid), z_valid, (xi_flat, yi_flat),
-                        method='linear'
-                    )
-                    if np.any(np.isnan(grid_thick)):
-                        nearest = griddata(
-                            (x_valid, y_valid), z_valid, (xi_flat, yi_flat),
-                            method='nearest'
-                        )
-                        grid_thick = np.where(np.isnan(grid_thick), nearest, grid_thick)
-
-                    grid_thick = np.clip(grid_thick, 0.5, None)
-                    thickness_grids[layer_name] = grid_thick.reshape(XI.shape)
-
-            self.progress.emit("正在构建三维模型...")
-
-            builder = GeologicalModelBuilder(
-                layer_order=self.data_result['layer_order'],
-                resolution=self.resolution,
-                base_level=self.base_level,
-                gap_value=self.gap_value
-            )
-
-            block_models, XI, YI = builder.build_model(
-                thickness_grids=thickness_grids,
-                x_range=x_range,
-                y_range=y_range
-            )
-
-            self.progress.emit("✓ 三维模型构建完成!")
-            self.finished.emit(block_models, XI, YI)
-
-        except Exception as e:
-            import traceback
-            self.error.emit(f"建模失败: {str(e)}\n{traceback.format_exc()}")
 
 
 # =============================================================================
 # 钻孔信息对话框
 # =============================================================================
 
-class BoreholeInfoDialog(QDialog):
-    """显示钻孔详细信息的对话框"""
-    def __init__(self, borehole_id, df_layers, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle(f"钻孔详情: {borehole_id}")
-        self.resize(600, 400)
-        self.setStyleSheet("""
-            QDialog { background-color: #1e1e2e; color: #cdd6f4; }
-            QTableWidget { 
-                background-color: #181825; 
-                color: #cdd6f4; 
-                gridline-color: #45475a;
-                border: 1px solid #45475a;
-            }
-            QHeaderView::section {
-                background-color: #313244;
-                color: #cdd6f4;
-                padding: 4px;
-                border: 1px solid #45475a;
-            }
-            QTableWidget::item:selected { background-color: #45475a; }
-        """)
-
-        layout = QVBoxLayout(self)
-
-        # 标题信息
-        info_layout = QHBoxLayout()
-        info_layout.addWidget(QLabel(f"<h3>钻孔编号: {borehole_id}</h3>"))
-        
-        # 计算总深度
-        total_depth = df_layers['bottom_depth'].max() if not df_layers.empty else 0
-        info_layout.addWidget(QLabel(f"总深度: {total_depth:.2f} m"))
-        
-        info_layout.addStretch()
-        layout.addLayout(info_layout)
-
-        # 表格
-        self.table = QTableWidget()
-        self.table.setColumnCount(5)
-        self.table.setHorizontalHeaderLabels(["层序", "地层名称", "岩性", "厚度(m)", "底板深度(m)"])
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.table.verticalHeader().setVisible(False)
-        
-        # 填充数据
-        self.table.setRowCount(len(df_layers))
-        for i, (_, row) in enumerate(df_layers.iterrows()):
-            self.table.setItem(i, 0, QTableWidgetItem(str(row.get('layer_order', i+1))))
-            self.table.setItem(i, 1, QTableWidgetItem(str(row.get('layer_name', ''))))
-            self.table.setItem(i, 2, QTableWidgetItem(str(row.get('lithology', ''))))
-            self.table.setItem(i, 3, QTableWidgetItem(f"{row.get('thickness', 0):.2f}"))
-            self.table.setItem(i, 4, QTableWidgetItem(f"{row.get('bottom_depth', 0):.2f}"))
-
-        layout.addWidget(self.table)
+# Moved to src/gui/dialogs.py
 
 
 # =============================================================================
@@ -399,207 +122,39 @@ class GeologicalModelingApp(QMainWindow):
         self.cached_meshes = {}
         self.cached_textures = {} # 纹理缓存
         self.cached_sides_state = None
+        
+        # 实时更新状态
+        self.last_base_level = 0.0
+        self.resolution_timer = QTimer()
+        self.resolution_timer.setSingleShot(True)
+        self.resolution_timer.setInterval(1000) # 1秒延迟
+        self.resolution_timer.timeout.connect(self.build_3d_model)
 
-        self.project_root = Path(__file__).parent
+        if getattr(sys, 'frozen', False):
+            self.project_root = Path(sys.executable).parent
+        else:
+            self.project_root = Path(__file__).parent
+            
         self.data_dir = self.project_root / 'data'
 
         self.init_ui()
+        self.setup_logging()
         self.check_gpu()
+        self.load_settings()
+
+    def setup_logging(self):
+        """Setup logging system"""
+        self.log_handler = setup_logging()
+        self.log_handler.new_record.connect(self.append_log)
 
     def apply_modern_style(self):
         """应用现代深色主题样式"""
-        style_sheet = """
-        /* 全局样式 */
-        QMainWindow {
-            background-color: #1e1e2e;
-            color: #cdd6f4;
-        }
-        QWidget {
-            background-color: #1e1e2e;
-            color: #cdd6f4;
-            font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
-            font-size: 14px;
-        }
-        
-        /* 滚动区域背景 */
-        QScrollArea {
-            background-color: #1e1e2e;
-            border: none;
-        }
-        QScrollArea > QWidget > QWidget {
-            background-color: #1e1e2e;
-        }
-        
-        /* 分组框 */
-        QGroupBox {
-            border: 2px solid #313244;
-            border-radius: 8px;
-            margin-top: 24px;
-            padding-top: 12px;
-            background-color: #252635;
-            font-weight: bold;
-        }
-        QGroupBox::title {
-            subcontrol-origin: margin;
-            subcontrol-position: top left;
-            padding: 6px 12px;
-            background-color: #313244;
-            border-top-left-radius: 8px;
-            border-top-right-radius: 8px;
-            color: #89b4fa;
-            font-size: 15px;
-        }
-
-        /* 按钮通用 */
-        QPushButton {
-            background-color: #45475a;
-            border: none;
-            border-radius: 6px;
-            padding: 10px 20px;
-            color: #ffffff;
-            font-weight: bold;
-            font-size: 14px;
-        }
-        QPushButton:hover {
-            background-color: #585b70;
-        }
-        QPushButton:pressed {
-            background-color: #313244;
-        }
-        QPushButton:disabled {
-            background-color: #313244;
-            color: #6c7086;
-        }
-
-        /* 主要操作按钮 (蓝色) */
-        QPushButton#primary {
-            background-color: #89b4fa;
-            color: #1e1e2e;
-        }
-        QPushButton#primary:hover {
-            background-color: #b4befe;
-        }
-        QPushButton#primary:pressed {
-            background-color: #74c7ec;
-        }
-
-        /* 成功/导出按钮 (绿色) */
-        QPushButton#success {
-            background-color: #a6e3a1;
-            color: #1e1e2e;
-        }
-        QPushButton#success:hover {
-            background-color: #94e2d5;
-        }
-
-        /* 输入控件 */
-        QComboBox, QSpinBox, QDoubleSpinBox, QTextEdit, QListWidget {
-            background-color: #313244;
-            border: 1px solid #45475a;
-            border-radius: 4px;
-            padding: 6px;
-            color: #cdd6f4;
-            selection-background-color: #585b70;
-            min-height: 20px;
-        }
-        QComboBox::drop-down {
-            border: none;
-            background: transparent;
-        }
-        QComboBox::down-arrow {
-            image: none;
-            border-left: 6px solid transparent;
-            border-right: 6px solid transparent;
-            border-top: 6px solid #cdd6f4;
-            margin-right: 8px;
-        }
-
-        /* 滚动条 */
-        QScrollBar:vertical {
-            border: none;
-            background: #1e1e2e;
-            width: 12px;
-            margin: 0px;
-        }
-        QScrollBar::handle:vertical {
-            background: #45475a;
-            min-height: 20px;
-            border-radius: 6px;
-        }
-        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
-            height: 0px;
-        }
-
-        /* 进度条 */
-        QProgressBar {
-            border: none;
-            background-color: #313244;
-            border-radius: 4px;
-            text-align: center;
-            color: #cdd6f4;
-            min-height: 20px;
-        }
-        QProgressBar::chunk {
-            background-color: #89b4fa;
-            border-radius: 4px;
-        }
-
-        /* 分割器 */
-        QSplitter::handle {
-            background-color: #45475a;
-            width: 4px;
-        }
-        
-        /* 标签 */
-        QLabel {
-            color: #cdd6f4;
-            padding: 2px;
-        }
-        QLabel#header {
-            color: #89b4fa;
-            font-size: 18px;
-            font-weight: bold;
-            padding: 10px 0;
-        }
-        
-        /* 复选框 */
-        QCheckBox {
-            spacing: 10px;
-        }
-        QCheckBox::indicator {
-            width: 20px;
-            height: 20px;
-            border-radius: 4px;
-            border: 1px solid #45475a;
-            background-color: #313244;
-        }
-        QCheckBox::indicator:checked {
-            background-color: #89b4fa;
-            border-color: #89b4fa;
-        }
-        
-        /* 滑块 */
-        QSlider::groove:horizontal {
-            border: 1px solid #45475a;
-            height: 8px;
-            background: #313244;
-            margin: 2px 0;
-            border-radius: 4px;
-        }
-        QSlider::handle:horizontal {
-            background: #89b4fa;
-            border: 1px solid #89b4fa;
-            width: 20px;
-            height: 20px;
-            margin: -7px 0;
-            border-radius: 10px;
-        }
-        """
-        self.setStyleSheet(style_sheet)
+        self.setStyleSheet(MODERN_STYLE)
 
     def init_ui(self):
         """初始化用户界面"""
         self.apply_modern_style()
+        self.create_menu_bar()
         
         self.log_text = None
         self.stats_text = None
@@ -614,8 +169,8 @@ class GeologicalModelingApp(QMainWindow):
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
-        left_panel = self.create_control_panel()
-        splitter.addWidget(left_panel)
+        self.control_panel = self.create_control_panel()
+        splitter.addWidget(self.control_panel)
 
         center_panel = self.create_render_panel()
         splitter.addWidget(center_panel)
@@ -635,6 +190,160 @@ class GeologicalModelingApp(QMainWindow):
         main_layout.addWidget(splitter)
 
         self.statusBar().showMessage("就绪 | GPU: 检测中...")
+
+    def create_menu_bar(self):
+        """创建菜单栏"""
+        menubar = self.menuBar()
+        
+        # 文件菜单
+        file_menu = menubar.addMenu('文件(&F)')
+        
+        open_action = QAction('打开项目(&P)...', self)
+        open_action.setShortcut('Ctrl+Shift+O')
+        open_action.triggered.connect(self.load_project)
+        file_menu.addAction(open_action)
+        
+        save_action = QAction('保存项目(&S)...', self)
+        save_action.setShortcut('Ctrl+S')
+        save_action.triggered.connect(self.save_project)
+        file_menu.addAction(save_action)
+        
+        file_menu.addSeparator()
+
+        load_data_action = QAction('加载数据(&L)', self)
+        load_data_action.setShortcut('Ctrl+O')
+        load_data_action.triggered.connect(self.load_data)
+        file_menu.addAction(load_data_action)
+        
+        file_menu.addSeparator()
+        
+        exit_action = QAction('退出(&X)', self)
+        exit_action.setShortcut('Ctrl+Q')
+        exit_action.triggered.connect(self.close)
+        file_menu.addAction(exit_action)
+        
+        # 视图菜单
+        view_menu = menubar.addMenu('视图(&V)')
+        
+        refresh_action = QAction('刷新渲染(&R)', self)
+        refresh_action.setShortcut('Ctrl+R')
+        refresh_action.triggered.connect(self.refresh_render)
+        view_menu.addAction(refresh_action)
+
+    def load_settings(self):
+        """加载用户配置"""
+        settings = QSettings("GNN_GeoMod", "App")
+        
+        # 恢复窗口大小和位置
+        geometry = settings.value("geometry")
+        if geometry:
+            self.restoreGeometry(geometry)
+            
+        # 恢复上次的数据目录
+        last_dir = settings.value("last_data_dir")
+        if last_dir and os.path.exists(last_dir):
+            self.data_dir = Path(last_dir)
+            
+        # 恢复参数
+        if hasattr(self, 'k_neighbors_spin'):
+            self.k_neighbors_spin.setValue(int(settings.value("k_neighbors", 10)))
+            
+        if hasattr(self, 'resolution_spin'):
+            self.resolution_spin.setValue(int(settings.value("resolution", 50)))
+
+    def save_settings(self):
+        """保存用户配置"""
+        settings = QSettings("GNN_GeoMod", "App")
+        settings.setValue("geometry", self.saveGeometry())
+        settings.setValue("last_data_dir", str(self.data_dir))
+        
+        if hasattr(self, 'k_neighbors_spin'):
+            settings.setValue("k_neighbors", self.k_neighbors_spin.value())
+            
+        if hasattr(self, 'resolution_spin'):
+            settings.setValue("resolution", self.resolution_spin.value())
+
+    def closeEvent(self, event: QCloseEvent):
+        """窗口关闭事件"""
+        self.save_settings()
+        event.accept()
+
+    def save_project(self):
+        """保存项目状态"""
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "保存项目", "", "JSON Files (*.json)"
+        )
+        if not file_path:
+            return
+            
+        project_data = {
+            "version": "2.0",
+            "data_dir": str(self.data_dir),
+            "params": {
+                "merge_coal": self.merge_coal_cb.isChecked(),
+                "layer_method": self.layer_method_combo.currentText(),
+                "k_neighbors": self.k_neighbors_spin.value(),
+                "min_occurrence": self.min_occurrence_spin.value(),
+                "resolution": self.resolution_spin.value(),
+                "base_level": self.base_level_spin.value(),
+                "use_traditional": self.traditional_radio.isChecked(),
+                "interp_method": self.interp_method_combo.currentText()
+            }
+        }
+        
+        try:
+            with open(file_path, 'w', encoding='utf-8') as f:
+                json.dump(project_data, f, indent=4, ensure_ascii=False)
+            self.log(f"✓ 项目已保存: {file_path}")
+            self.statusBar().showMessage(f"项目已保存: {file_path}")
+        except Exception as e:
+            QMessageBox.critical(self, "保存失败", str(e))
+
+    def load_project(self):
+        """加载项目状态"""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "打开项目", "", "JSON Files (*.json)"
+        )
+        if not file_path:
+            return
+            
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                project_data = json.load(f)
+                
+            # 恢复参数
+            params = project_data.get("params", {})
+            self.merge_coal_cb.setChecked(params.get("merge_coal", True))
+            self.layer_method_combo.setCurrentText(params.get("layer_method", "position_based"))
+            self.k_neighbors_spin.setValue(params.get("k_neighbors", 10))
+            self.min_occurrence_spin.setValue(params.get("min_occurrence", 0.05))
+            self.resolution_spin.setValue(params.get("resolution", 50))
+            self.base_level_spin.setValue(params.get("base_level", 0.0))
+            
+            if params.get("use_traditional", True):
+                self.traditional_radio.setChecked(True)
+            else:
+                self.gnn_radio.setChecked(True)
+                
+            self.interp_method_combo.setCurrentText(params.get("interp_method", "idw"))
+            
+            # 恢复数据目录
+            data_dir = project_data.get("data_dir")
+            if data_dir and os.path.exists(data_dir):
+                self.data_dir = Path(data_dir)
+                reply = QMessageBox.question(
+                    self, "加载数据", 
+                    f"项目包含数据目录: {data_dir}\n是否立即加载数据?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                )
+                if reply == QMessageBox.StandardButton.Yes:
+                    self.load_data()
+            
+            self.log(f"✓ 项目已加载: {file_path}")
+            self.statusBar().showMessage(f"项目已加载: {file_path}")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "加载失败", str(e))
 
     def create_control_panel(self) -> QWidget:
         """创建左侧控制面板"""
@@ -663,17 +372,20 @@ class GeologicalModelingApp(QMainWindow):
         data_layout.setSpacing(10)
 
         self.merge_coal_cb = QCheckBox("合并煤层")
+        self.merge_coal_cb.setToolTip("是否将所有煤层合并为一个'Coal'层，以简化模型。")
         data_layout.addWidget(self.merge_coal_cb)
 
         data_layout.addWidget(QLabel("层序推断方法:"))
         self.layer_method_combo = QComboBox()
         self.layer_method_combo.addItems(['position_based', 'simple', 'marker_based'])
+        self.layer_method_combo.setToolTip("推断地层层序的方法：\n- position_based: 基于深度位置\n- simple: 简单统计\n- marker_based: 基于标志层")
         data_layout.addWidget(self.layer_method_combo)
 
         data_layout.addWidget(QLabel("K邻居数:"))
         self.k_neighbors_spin = QSpinBox()
         self.k_neighbors_spin.setRange(4, 20)
         self.k_neighbors_spin.setValue(10)
+        self.k_neighbors_spin.setToolTip("构建图网络时的邻居节点数量 (K)。\n值越大，连接越稠密，计算越慢但可能更平滑。")
         data_layout.addWidget(self.k_neighbors_spin)
 
         data_layout.addWidget(QLabel("最小出现率:"))
@@ -681,6 +393,7 @@ class GeologicalModelingApp(QMainWindow):
         self.min_occurrence_spin.setRange(0.0, 0.5)
         self.min_occurrence_spin.setValue(0.05)
         self.min_occurrence_spin.setSingleStep(0.05)
+        self.min_occurrence_spin.setToolTip("地层在所有钻孔中出现的最小比例。\n低于此比例的地层将被忽略。")
         data_layout.addWidget(self.min_occurrence_spin)
 
         self.load_btn = QPushButton("🔄 加载数据")
@@ -699,6 +412,7 @@ class GeologicalModelingApp(QMainWindow):
         self.traditional_radio = QCheckBox("传统方法 (IDW/Kriging)")
         self.traditional_radio.setChecked(True)
         self.traditional_radio.stateChanged.connect(self.on_method_changed)
+        self.traditional_radio.setToolTip("使用反距离加权(IDW)或克里金(Kriging)插值。")
         method_layout.addWidget(self.traditional_radio)
 
         self.traditional_params = QWidget()
@@ -712,6 +426,7 @@ class GeologicalModelingApp(QMainWindow):
 
         self.gnn_radio = QCheckBox("GNN深度学习")
         self.gnn_radio.stateChanged.connect(self.on_method_changed)
+        self.gnn_radio.setToolTip("使用图神经网络(GNN)进行深度学习预测。")
         method_layout.addWidget(self.gnn_radio)
 
         self.gnn_params = QWidget()
@@ -750,11 +465,14 @@ class GeologicalModelingApp(QMainWindow):
         self.resolution_spin = QSpinBox()
         self.resolution_spin.setRange(20, 200)
         self.resolution_spin.setValue(50)
+        self.resolution_spin.setToolTip("输出网格的分辨率 (X/Y方向的网格数量)。\n值越大，模型越精细，但内存消耗和计算时间呈平方增长。")
+        self.resolution_spin.valueChanged.connect(self.on_resolution_changed)
         modeling_layout.addWidget(self.resolution_spin)
 
         modeling_layout.addWidget(QLabel("基准面高程(m):"))
         self.base_level_spin = QDoubleSpinBox()
         self.base_level_spin.setValue(0.0)
+        self.base_level_spin.valueChanged.connect(self.on_base_level_changed)
         modeling_layout.addWidget(self.base_level_spin)
 
         self.model_btn = QPushButton("🏗️ 构建三维模型")
@@ -805,6 +523,10 @@ class GeologicalModelingApp(QMainWindow):
         self.slice_pos_slider.valueChanged.connect(self.on_slice_pos_changed)
         slice_layout.addWidget(self.slice_pos_slider)
         
+        self.interactive_slice_cb = QCheckBox("交互式手柄")
+        self.interactive_slice_cb.stateChanged.connect(self.on_interactive_slice_toggled)
+        slice_layout.addWidget(self.interactive_slice_cb)
+        
         self.slice_controls.setVisible(False)
         interact_layout.addWidget(self.slice_controls)
 
@@ -812,6 +534,12 @@ class GeologicalModelingApp(QMainWindow):
         self.pick_borehole_cb = QCheckBox("启用钻孔点击")
         self.pick_borehole_cb.stateChanged.connect(self.on_pick_mode_toggled)
         interact_layout.addWidget(self.pick_borehole_cb)
+
+        # 测量工具
+        self.measure_btn = QPushButton("📏 测量距离")
+        self.measure_btn.setCheckable(True)
+        self.measure_btn.clicked.connect(self.toggle_measure_mode)
+        interact_layout.addWidget(self.measure_btn)
 
         interact_group.setLayout(interact_layout)
         layout.addWidget(interact_group)
@@ -822,10 +550,22 @@ class GeologicalModelingApp(QMainWindow):
         render_layout.setSpacing(10)
 
         render_layout.addWidget(QLabel("显示地层:"))
+        
+        # 地层列表控制按钮
+        layer_btn_layout = QHBoxLayout()
+        self.select_all_btn = QPushButton("全选")
+        self.select_all_btn.clicked.connect(self.select_all_layers)
+        self.select_none_btn = QPushButton("全不选")
+        self.select_none_btn.clicked.connect(self.deselect_all_layers)
+        layer_btn_layout.addWidget(self.select_all_btn)
+        layer_btn_layout.addWidget(self.select_none_btn)
+        render_layout.addLayout(layer_btn_layout)
+
         self.layer_list = QListWidget()
-        self.layer_list.setMaximumHeight(120)
-        self.layer_list.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
-        self.layer_list.itemSelectionChanged.connect(self.on_layer_selection_changed)
+        self.layer_list.setMaximumHeight(150)
+        # 使用 NoSelection 模式，完全依赖 CheckBox
+        self.layer_list.setSelectionMode(QListWidget.SelectionMode.NoSelection)
+        self.layer_list.itemChanged.connect(self.on_layer_item_changed)
         render_layout.addWidget(self.layer_list)
 
         render_layout.addWidget(QLabel("渲染模式:"))
@@ -1061,7 +801,7 @@ class GeologicalModelingApp(QMainWindow):
             self.log("⚠️ 未检测到CUDA GPU，将使用CPU")
             self.statusBar().showMessage("就绪 | GPU: 不可用 (CPU模式)")
 
-    def log(self, message: str):
+    def append_log(self, message: str):
         """添加日志"""
         if self.log_text is not None:
             self.log_text.append(message)
@@ -1069,12 +809,27 @@ class GeologicalModelingApp(QMainWindow):
         else:
             print(message)
 
+    def log(self, message: str):
+        """Legacy log method wrapper"""
+        logging.info(message)
+
+    def set_busy_state(self, is_busy: bool):
+        """设置忙碌状态"""
+        if is_busy:
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            self.control_panel.setEnabled(False)
+            self.menuBar().setEnabled(False)
+        else:
+            QApplication.restoreOverrideCursor()
+            self.control_panel.setEnabled(True)
+            self.menuBar().setEnabled(True)
+
     def load_data(self):
         """加载数据"""
         self.log("\n" + "="*50)
         self.log("开始加载数据...")
 
-        self.load_btn.setEnabled(False)
+        self.set_busy_state(True)
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, 0)
 
@@ -1095,9 +850,28 @@ class GeologicalModelingApp(QMainWindow):
     def on_data_loaded(self, result: dict):
         """数据加载完成"""
         self.data_result = result
-        self.load_btn.setEnabled(True)
+        self.set_busy_state(False)
         self.train_btn.setEnabled(True)
         self.progress_bar.setVisible(False)
+
+        # 自动计算基准面: 优先使用原始数据中的z/高程字段
+        raw_df = result.get('raw_df')
+        auto_base = None
+        if raw_df is not None:
+            for col in ['z', 'elevation', 'top_depth', 'bottom_depth']:
+                if col in raw_df.columns:
+                    try:
+                        vals = raw_df[col].astype(float)
+                        if len(vals) > 0:
+                            auto_base = float(vals.min())
+                            break
+                    except Exception:
+                        pass
+        if auto_base is not None and hasattr(self, 'base_level_spin'):
+            self.base_level_spin.setValue(auto_base)
+            self.log(f"✓ 自动基准面: {auto_base:.2f} (来自数据最小值)")
+        else:
+            self.log("⚠️ 未找到z/高程字段，基准面保持默认0")
 
         stats = f"""
 📊 数据统计:
@@ -1118,10 +892,34 @@ class GeologicalModelingApp(QMainWindow):
         if self.data_result is None:
             QMessageBox.warning(self, "警告", "请先加载数据!")
             return
+            
+        # Input validation
+        if len(self.data_result['borehole_ids']) < 3:
+            QMessageBox.warning(self, "警告", "钻孔数量过少 (<3)，无法进行有效训练或插值。")
+            return
 
         self.log("\n" + "="*50)
 
+        # 智能选择：小样本自动切换传统方法
+        n_bh = len(self.data_result.get('borehole_ids', [])) if self.data_result else 0
+        recommended = None
+        if n_bh < 5:
+            recommended = 'constant'
+        elif n_bh < 15:
+            recommended = 'idw'
+        elif n_bh < 50:
+            recommended = 'kriging'
+
         use_traditional = self.traditional_radio.isChecked()
+
+        if recommended is not None:
+            if not use_traditional:
+                self.traditional_radio.setChecked(True)
+                self.gnn_radio.setChecked(False)
+                use_traditional = True
+            self.log(f"⚠️ 钻孔样本较少({n_bh})，自动使用传统方法: {recommended}")
+            if hasattr(self, 'interp_method_combo'):
+                self.interp_method_combo.setCurrentText('kriging' if recommended == 'kriging' else 'idw')
 
         if use_traditional:
             self.train_traditional()
@@ -1133,7 +931,7 @@ class GeologicalModelingApp(QMainWindow):
         self.log("使用传统地质统计学方法...")
         self.use_traditional = True
 
-        self.train_btn.setEnabled(False)
+        self.set_busy_state(True)
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, 0)
 
@@ -1154,7 +952,7 @@ class GeologicalModelingApp(QMainWindow):
         self.model = None
         self.use_traditional = True
 
-        self.train_btn.setEnabled(True)
+        self.set_busy_state(False)
         self.model_btn.setEnabled(True)
         self.progress_bar.setVisible(False)
 
@@ -1213,7 +1011,7 @@ class GeologicalModelingApp(QMainWindow):
                 'heads': 4
             }
 
-        self.train_btn.setEnabled(False)
+        self.set_busy_state(True)
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, config['epochs'])
 
@@ -1234,7 +1032,7 @@ class GeologicalModelingApp(QMainWindow):
         self.predictor = model
         self.use_traditional = False
 
-        self.train_btn.setEnabled(True)
+        self.set_busy_state(False)
         self.model_btn.setEnabled(True)
         self.progress_bar.setVisible(False)
 
@@ -1257,11 +1055,22 @@ class GeologicalModelingApp(QMainWindow):
         if self.predictor is None:
             QMessageBox.warning(self, "警告", "请先训练模型!")
             return
+            
+        # Input validation
+        resolution = self.resolution_spin.value()
+        if resolution > 500:
+            reply = QMessageBox.question(
+                self, "高分辨率警告", 
+                f"当前分辨率 ({resolution}) 较高，可能会导致内存溢出或计算缓慢。\n是否继续?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.No:
+                return
 
         self.log("\n" + "="*50)
         self.log("开始构建三维模型...")
 
-        self.model_btn.setEnabled(False)
+        self.set_busy_state(True)
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, 0)
 
@@ -1279,6 +1088,27 @@ class GeologicalModelingApp(QMainWindow):
         self.modeler.error.connect(self.on_error)
 
         self.modeler.start()
+
+    def on_resolution_changed(self, value):
+        """分辨率改变 - 延迟自动重建"""
+        if self.predictor is not None:
+            self.resolution_timer.start()
+
+    def on_base_level_changed(self, value):
+        """基准面改变 - 实时平移"""
+        if not self.plotter or not self.block_models:
+            return
+            
+        delta = value - self.last_base_level
+        self.last_base_level = value
+        
+        # 平移所有Actor
+        for actor in self.plotter.actors.values():
+            if hasattr(actor, 'SetPosition'):
+                pos = actor.GetPosition()
+                actor.SetPosition(pos[0], pos[1], pos[2] + delta)
+        
+        self.plotter.render()
 
     def on_z_scale_changed(self, value):
         """Z轴缩放改变"""
@@ -1328,10 +1158,27 @@ class GeologicalModelingApp(QMainWindow):
             normal = (0, 0, 1)
             
         # 更新平面部件
-        self.active_plane_widget.SetOrigin(origin)
-        self.active_plane_widget.SetNormal(normal)
-        self.active_plane_widget.UpdatePlacement()
-        self.plotter.render()
+        if self.active_plane_widget:
+            self.active_plane_widget.SetOrigin(origin)
+            self.active_plane_widget.SetNormal(normal)
+            self.active_plane_widget.UpdatePlacement()
+            self.plotter.render()
+
+    def on_interactive_slice_toggled(self, state):
+        """交互式切割切换"""
+        is_checked = (state == Qt.CheckState.Checked.value)
+        self.slice_axis_combo.setEnabled(not is_checked)
+        self.slice_pos_slider.setEnabled(not is_checked)
+        
+        if is_checked:
+            # 切换到任意方向以启用交互式手柄
+            self.slice_axis_combo.setCurrentText('任意')
+        else:
+            # 恢复默认
+            if self.slice_axis_combo.currentText() == '任意':
+                self.slice_axis_combo.setCurrentText('X轴')
+            
+        self.render_3d_model()
 
     def on_pick_mode_toggled(self, state):
         """钻孔拾取开关"""
@@ -1370,16 +1217,70 @@ class GeologicalModelingApp(QMainWindow):
             dialog = BoreholeInfoDialog(bh_id, bh_data, self)
             dialog.show()
 
+    def toggle_measure_mode(self):
+        """切换测量模式"""
+        if self.measure_btn.isChecked():
+            self.pick_borehole_cb.setChecked(False)
+            self.measure_points = []
+            self.plotter.enable_point_picking(callback=self.on_measure_picked, show_message=True, font_size=10, color='pink', point_size=10, use_picker=True)
+            self.log("📏 测量模式: 请点击两个点进行测量")
+        else:
+            self.plotter.disable_picking()
+            self.plotter.clear_measure_widgets() # If available
+            # Remove markers
+            self.plotter.remove_actor('measure_p1')
+            self.plotter.remove_actor('measure_p2')
+            self.plotter.remove_actor('measure_line')
+            self.log("已退出测量模式")
+
+    def on_measure_picked(self, point, actor):
+        """测量点拾取回调"""
+        self.measure_points.append(point)
+        
+        if len(self.measure_points) == 1:
+            self.plotter.add_mesh(
+                pv.PolyData(point), color='red', point_size=10, 
+                render_points_as_spheres=True, name='measure_p1'
+            )
+            self.log(f"起点: ({point[0]:.1f}, {point[1]:.1f}, {point[2]:.1f})")
+            
+        elif len(self.measure_points) == 2:
+            p1 = self.measure_points[0]
+            p2 = point
+            
+            self.plotter.add_mesh(
+                pv.PolyData(p2), color='red', point_size=10, 
+                render_points_as_spheres=True, name='measure_p2'
+            )
+            
+            # Draw line
+            line = pv.Line(p1, p2)
+            dist = np.linalg.norm(np.array(p1) - np.array(p2))
+            
+            self.plotter.add_mesh(line, color='yellow', line_width=5, name='measure_line')
+            
+            mid_point = [(p1[0]+p2[0])/2, (p1[1]+p2[1])/2, (p1[2]+p2[2])/2]
+            self.plotter.add_point_labels(
+                [mid_point], [f"{dist:.2f} m"], 
+                point_size=0, font_size=20, text_color='yellow', name='measure_label'
+            )
+            
+            self.log(f"终点: ({point[0]:.1f}, {point[1]:.1f}, {point[2]:.1f})")
+            self.log(f"📏 距离: {dist:.2f} m")
+            
+            # Reset for next measurement
+            self.measure_points = []
+
     def on_contour_toggled(self, state):
-        """等值线开关"""
+        """等值线开关 - 实时"""
         is_checked = (state == Qt.CheckState.Checked.value)
         self.contour_params_widget.setVisible(is_checked)
-        self.render_3d_model()
+        self.update_contours()
 
     def on_contour_params_changed(self):
-        """等值线参数改变"""
+        """等值线参数改变 - 实时"""
         if self.contour_cb.isChecked():
-            self.render_3d_model()
+            self.update_contours()
 
     def on_fly_mode_toggled(self, state):
         """漫游模式开关"""
@@ -1398,13 +1299,14 @@ class GeologicalModelingApp(QMainWindow):
         self.block_models = block_models
         self.XI = XI
         self.YI = YI
+        self.last_base_level = self.base_level_spin.value()
         
         # 清空渲染缓存
         self.cached_meshes = {}
         self.cached_textures = {}
         self.cached_sides_state = None
 
-        self.model_btn.setEnabled(True)
+        self.set_busy_state(False)
         self.progress_bar.setVisible(False)
 
         stats = "✓ 三维模型构建完成\n\n各层统计:\n"
@@ -1413,10 +1315,13 @@ class GeologicalModelingApp(QMainWindow):
 
         self.log(stats)
 
+        # 填充地层列表，使用复选框
         self.layer_list.clear()
         for bm in block_models:
-            self.layer_list.addItem(bm.name)
-        self.layer_list.selectAll()
+            item = QListWidgetItem(bm.name)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked)
+            self.layer_list.addItem(item)
 
         if PYVISTA_AVAILABLE and self.plotter is not None:
             self.render_3d_model()
@@ -1427,6 +1332,72 @@ class GeologicalModelingApp(QMainWindow):
         self.export_stl_btn.setEnabled(True)
         self.export_vtk_btn.setEnabled(True)
         self.export_flac3d_btn.setEnabled(True)
+
+    def update_contours(self):
+        """更新等值线显示"""
+        if not self.plotter or not self.block_models:
+            return
+
+        # 先移除旧的等值线
+        for bm in self.block_models:
+            self.plotter.remove_actor(f"{bm.name}_contour")
+
+        if not self.contour_cb.isChecked():
+            return
+
+        contour_type = self.contour_type_combo.currentText()
+        interval = self.contour_interval_spin.value()
+        
+        # 获取可见层
+        visible_layers = set()
+        if hasattr(self, 'layer_list'):
+            for i in range(self.layer_list.count()):
+                item = self.layer_list.item(i)
+                if item.checkState() == Qt.CheckState.Checked:
+                    visible_layers.add(item.text())
+        
+        for bm in self.block_models:
+            if bm.name not in visible_layers:
+                continue
+            
+            try:
+                # 构建网格用于计算等值线
+                # 使用顶板作为显示位置，这样等值线浮在层面上方
+                grid = pv.StructuredGrid(self.XI, self.YI, bm.top_surface)
+                
+                scalars_name = ""
+                if contour_type == '底板高程':
+                    scalars_name = "Elevation"
+                    grid.point_data[scalars_name] = bm.bottom_surface.flatten()
+                else: # 地层厚度
+                    scalars_name = "Thickness"
+                    thickness = bm.top_surface - bm.bottom_surface
+                    grid.point_data[scalars_name] = thickness.flatten()
+                
+                # 计算等值线数值范围
+                data_min = grid.point_data[scalars_name].min()
+                data_max = grid.point_data[scalars_name].max()
+                
+                if data_max > data_min:
+                    # 生成等值线值
+                    start_val = np.floor(data_min / interval) * interval
+                    levels = np.arange(start_val, data_max, interval)
+                    levels = levels[levels >= data_min]
+                    
+                    if len(levels) > 0:
+                        contours = grid.contour(isosurfaces=levels, scalars=scalars_name)
+                        
+                        line_color = 'white' if contour_type == '底板高程' else 'yellow'
+                        
+                        self.plotter.add_mesh(
+                            contours, 
+                            color=line_color, 
+                            line_width=3, 
+                            name=f"{bm.name}_contour",
+                            render_lines_as_tubes=True
+                        )
+            except Exception as e:
+                print(f"等值线生成失败 ({bm.name}): {e}")
 
     def render_3d_model(self):
         """渲染3D模型到PyVista窗口"""
@@ -1452,12 +1423,13 @@ class GeologicalModelingApp(QMainWindow):
             render_mode = self.render_mode_combo.currentText() if hasattr(self, 'render_mode_combo') else '基础渲染'
             enable_slicing = self.slice_cb.isChecked() if hasattr(self, 'slice_cb') else False
 
-            selected_layers = set()
-            if hasattr(self, 'layer_list'):
-                for item in self.layer_list.selectedItems():
-                    selected_layers.add(item.text())
-            else:
-                selected_layers = {bm.name for bm in self.block_models}
+            # selected_layers 逻辑已废弃，改用 CheckBox 状态
+            # selected_layers = set()
+            # if hasattr(self, 'layer_list'):
+            #     for item in self.layer_list.selectedItems():
+            #         selected_layers.add(item.text())
+            # else:
+            #     selected_layers = {bm.name for bm in self.block_models}
 
             renderer = GeologicalModelRenderer(use_pbr=(render_mode=='增强材质'))
 
@@ -1499,8 +1471,15 @@ class GeologicalModelingApp(QMainWindow):
                 for bm in self.block_models:
                     if bm.name not in self.cached_meshes:
                         continue
-                    # 即使未选中也可能需要参与切割？不，只切割显示的
-                    if bm.name not in selected_layers:
+                    
+                    # 检查是否可见（勾选）
+                    is_visible = True
+                    if hasattr(self, 'layer_list'):
+                        items = self.layer_list.findItems(bm.name, Qt.MatchFlag.MatchExactly)
+                        if items:
+                            is_visible = (items[0].checkState() == Qt.CheckState.Checked)
+                    
+                    if not is_visible:
                         continue
                         
                     mesh, color = self.cached_meshes[bm.name]
@@ -1521,49 +1500,56 @@ class GeologicalModelingApp(QMainWindow):
                     elif axis == 'Z轴': normal = 'z'
                     
                     # 添加带切割部件的网格
+                    # 如果是交互式模式，启用交互
+                    interaction = self.interactive_slice_cb.isChecked() if hasattr(self, 'interactive_slice_cb') else False
+                    
                     actor = self.plotter.add_mesh_clip_plane(
                         merged_mesh,
                         normal=normal,
                         scalars='RGB',
                         rgb=True,
                         opacity=opacity,
-                        show_edges=show_edges
+                        show_edges=show_edges,
+                        interaction=interaction
                     )
                     
                     # 获取平面部件以便后续控制
                     if hasattr(self.plotter, 'plane_widgets') and self.plotter.plane_widgets:
                         self.active_plane_widget = self.plotter.plane_widgets[-1]
                     
-                    # 如果不是任意方向，应用滑块位置
-                    if axis != '任意':
+                    # 如果不是任意方向且非交互模式，应用滑块位置
+                    if axis != '任意' and not interaction:
                         self.on_slice_pos_changed(self.slice_pos_slider.value())
             
             else:
                 legend_entries = []
                 # 使用缓存的网格进行渲染
                 for bm in self.block_models:
-                    # if bm.name not in selected_layers:
-                    #     continue
-                    
+                    # 即使未选中也添加，但设置可见性
                     if bm.name not in self.cached_meshes:
                         continue
 
                     mesh, color = self.cached_meshes[bm.name]
-                    legend_entries.append((bm.name, color))
                     
-                    # 智能透明度控制：选中的层使用滑块透明度，未选中的层极度透明作为背景
-                    is_selected = bm.name in selected_layers
-                    if is_selected:
-                        layer_opacity = opacity
-                    else:
-                        layer_opacity = 0.05 # 背景层透明度 (5%)
+                    # 检查是否可见（勾选）
+                    is_visible = True
+                    if hasattr(self, 'layer_list'):
+                        # 查找对应项
+                        items = self.layer_list.findItems(bm.name, Qt.MatchFlag.MatchExactly)
+                        if items:
+                            is_visible = (items[0].checkState() == Qt.CheckState.Checked)
+                    
+                    if is_visible:
+                        legend_entries.append((bm.name, color))
+                    
+                    layer_opacity = opacity
 
                     if render_mode == '线框模式':
-                        self.plotter.add_mesh(
+                        actor = self.plotter.add_mesh(
                             mesh,
                             color=color,
                             style='wireframe',
-                            line_width=2 if is_selected else 1,
+                            line_width=2,
                             opacity=layer_opacity * 0.5,
                             name=bm.name
                         )
@@ -1588,12 +1574,12 @@ class GeologicalModelingApp(QMainWindow):
                              c = mesh.center
                              mesh.texture_map_to_plane(origin=c, point_u=(c[0]+1, c[1], c[2]), point_v=(c[0], c[1]+1, c[2]), inplace=True)
 
-                        self.plotter.add_mesh(
+                        actor = self.plotter.add_mesh(
                             mesh,
                             texture=texture,
                             opacity=layer_opacity,
                             smooth_shading=True,
-                            show_edges=show_edges and is_selected, # 仅选中的层显示网格
+                            show_edges=show_edges,
                             edge_color='#000000',
                             line_width=1,
                             name=bm.name
@@ -1602,83 +1588,42 @@ class GeologicalModelingApp(QMainWindow):
                     elif render_mode == '增强材质':
                         # 获取PBR参数
                         pbr_params = RockMaterial.get_pbr_params(bm.name)
-                        self.plotter.add_mesh(
+                        actor = self.plotter.add_mesh(
                             mesh,
                             color=color,
                             opacity=layer_opacity,
                             smooth_shading=True,
                             pbr=True,
-                        metallic=pbr_params.get('metallic', 0.1),
-                        roughness=pbr_params.get('roughness', 0.6),
-                        diffuse=0.8,
-                        specular=0.5,
-                        show_edges=show_edges and is_selected,
-                        edge_color='#000000',
-                        line_width=1,
-                        name=bm.name
-                    )
-                else:
-                    self.plotter.add_mesh(
-                        mesh,
-                        color=color,
-                        opacity=layer_opacity,
-                        smooth_shading=True,
-                        show_edges=show_edges and is_selected,
-                        edge_color='#000000',
-                        line_width=1,
-                        name=bm.name
-                    )
+                            metallic=pbr_params.get('metallic', 0.1),
+                            roughness=pbr_params.get('roughness', 0.6),
+                            diffuse=0.8,
+                            specular=0.5,
+                            show_edges=show_edges,
+                            edge_color='#000000',
+                            line_width=1,
+                            name=bm.name
+                        )
+                    else:
+                        actor = self.plotter.add_mesh(
+                            mesh,
+                            color=color,
+                            opacity=layer_opacity,
+                            smooth_shading=True,
+                            show_edges=show_edges,
+                            edge_color='#000000',
+                            line_width=1,
+                            name=bm.name
+                        )
+                    
+                    # 设置初始可见性
+                    if actor:
+                        actor.SetVisibility(is_visible)
 
             if hasattr(self, 'show_boreholes_cb') and self.show_boreholes_cb.isChecked():
                 self.add_borehole_markers()
 
             # 绘制等值线
-            if hasattr(self, 'contour_cb') and self.contour_cb.isChecked():
-                contour_type = self.contour_type_combo.currentText()
-                interval = self.contour_interval_spin.value()
-                
-                for bm in self.block_models:
-                    if bm.name not in selected_layers:
-                        continue
-                    
-                    try:
-                        # 构建网格用于计算等值线
-                        # 使用顶板作为显示位置，这样等值线浮在层面上方
-                        grid = pv.StructuredGrid(self.XI, self.YI, bm.top_surface)
-                        
-                        scalars_name = ""
-                        if contour_type == '底板高程':
-                            scalars_name = "Elevation"
-                            grid.point_data[scalars_name] = bm.bottom_surface.flatten()
-                        else: # 地层厚度
-                            scalars_name = "Thickness"
-                            thickness = bm.top_surface - bm.bottom_surface
-                            grid.point_data[scalars_name] = thickness.flatten()
-                        
-                        # 计算等值线数值范围
-                        data_min = grid.point_data[scalars_name].min()
-                        data_max = grid.point_data[scalars_name].max()
-                        
-                        if data_max > data_min:
-                            # 生成等值线值
-                            start_val = np.floor(data_min / interval) * interval
-                            levels = np.arange(start_val, data_max, interval)
-                            levels = levels[levels >= data_min]
-                            
-                            if len(levels) > 0:
-                                contours = grid.contour(isosurfaces=levels, scalars=scalars_name)
-                                
-                                line_color = 'white' if contour_type == '底板高程' else 'yellow'
-                                
-                                self.plotter.add_mesh(
-                                    contours, 
-                                    color=line_color, 
-                                    line_width=3, 
-                                    name=f"{bm.name}_contour",
-                                    render_lines_as_tubes=True
-                                )
-                    except Exception as e:
-                        print(f"等值线生成失败 ({bm.name}): {e}")
+            self.update_contours()
 
             # 添加图例
             if legend_entries:
@@ -1815,9 +1760,77 @@ class GeologicalModelingApp(QMainWindow):
         dialog = BoreholeInfoDialog(borehole_id, borehole_df, self)
         dialog.exec()
 
-    def on_layer_selection_changed(self):
-        """层选择改变 - 实时更新"""
-        self.on_opacity_changed(self.opacity_slider.value())
+    def select_all_layers(self):
+        """全选地层"""
+        for i in range(self.layer_list.count()):
+            item = self.layer_list.item(i)
+            item.setCheckState(Qt.CheckState.Checked)
+
+    def deselect_all_layers(self):
+        """全不选地层"""
+        for i in range(self.layer_list.count()):
+            item = self.layer_list.item(i)
+            item.setCheckState(Qt.CheckState.Unchecked)
+
+    def on_layer_item_changed(self, item):
+        """地层勾选状态改变"""
+        self.update_layer_visibility()
+
+    def update_layer_visibility(self):
+        """更新图层可见性和图例"""
+        if not self.plotter or not self.block_models:
+            return
+
+        # 获取所有勾选的层
+        visible_layers = set()
+        if hasattr(self, 'layer_list'):
+            for i in range(self.layer_list.count()):
+                item = self.layer_list.item(i)
+                if item.checkState() == Qt.CheckState.Checked:
+                    visible_layers.add(item.text())
+        
+        legend_entries = []
+        
+        # 更新图层可见性
+        for bm in self.block_models:
+            actor_name = bm.name
+            if actor_name in self.plotter.actors:
+                actor = self.plotter.actors[actor_name]
+                is_visible = bm.name in visible_layers
+                
+                # 设置可见性
+                actor.SetVisibility(is_visible)
+                
+                # 如果可见，添加到图例
+                if is_visible:
+                    # 优先从缓存获取原始颜色，避免获取到修改后的属性
+                    color = 'white'
+                    if bm.name in self.cached_meshes:
+                        _, color = self.cached_meshes[bm.name]
+                    elif hasattr(actor, 'prop'):
+                        color = actor.prop.color
+                        
+                    legend_entries.append((bm.name, color))
+        
+        # 更新图例
+        self.plotter.remove_legend()
+        if legend_entries:
+             self.plotter.add_legend(
+                legend_entries,
+                bcolor=(0.15, 0.15, 0.2),
+                border=True,
+                loc='lower right'
+            )
+                bcolor=(0.15, 0.15, 0.2),
+                border=True,
+                loc='lower right'
+            )
+            
+        # 更新等值线可见性
+        if hasattr(self, 'contour_cb') and self.contour_cb.isChecked():
+            self.update_contours()
+            
+        self.plotter.render()
 
     def on_render_mode_changed(self, mode: str):
         """渲染模式改变"""
@@ -1832,35 +1845,15 @@ class GeologicalModelingApp(QMainWindow):
         if not self.plotter or not self.block_models:
             return
 
-        # 获取选中层
-        selected_layers = set()
-        if hasattr(self, 'layer_list'):
-            for item in self.layer_list.selectedItems():
-                selected_layers.add(item.text())
-        else:
-            selected_layers = {bm.name for bm in self.block_models}
-            
-        # 尝试直接更新Actor属性，不重绘
-        updated = False
-        try:
-            for bm in self.block_models:
-                actor_name = bm.name
-                if actor_name in self.plotter.actors:
-                    actor = self.plotter.actors[actor_name]
-                    is_selected = bm.name in selected_layers
-                    
-                    target_opacity = opacity if is_selected else 0.05
-                    if hasattr(actor, 'prop'):
-                        actor.prop.opacity = target_opacity
-                        updated = True
-            
-            if updated:
-                self.plotter.render()
-            else:
-                # 如果没有找到actor，可能需要重绘
-                self.render_3d_model()
-        except:
-            self.render_3d_model()
+        # 直接更新所有层Actor的透明度
+        for bm in self.block_models:
+            actor_name = bm.name
+            if actor_name in self.plotter.actors:
+                actor = self.plotter.actors[actor_name]
+                if hasattr(actor, 'prop'):
+                    actor.prop.opacity = opacity
+        
+        self.plotter.render()
 
     def on_sides_toggled(self):
         """侧面显示切换"""
@@ -1868,9 +1861,19 @@ class GeologicalModelingApp(QMainWindow):
             self.render_3d_model()
 
     def on_boreholes_toggled(self):
-        """钻孔显示切换"""
-        if self.block_models is not None:
-            self.render_3d_model()
+        """钻孔显示切换 - 实时"""
+        if not self.plotter or not self.block_models:
+            return
+            
+        if self.show_boreholes_cb.isChecked():
+            self.add_borehole_markers()
+        else:
+            # 移除钻孔标记
+            if self.data_result:
+                 n_boreholes = len(self.data_result['borehole_ids'])
+                 for i in range(n_boreholes):
+                     self.plotter.remove_actor(f'borehole_cyl_{i}')
+                     self.plotter.remove_actor(f'label_{i}')
 
     def refresh_render(self):
         """刷新渲染"""
@@ -2050,7 +2053,7 @@ class GeologicalModelingApp(QMainWindow):
         """错误处理"""
         self.log(f"\n✗ 错误: {message}")
 
-        self.load_btn.setEnabled(True)
+        self.set_busy_state(False)
         self.train_btn.setEnabled(True if self.data_result else False)
         self.model_btn.setEnabled(True if self.predictor else False)
         self.progress_bar.setVisible(False)
@@ -2059,8 +2062,22 @@ class GeologicalModelingApp(QMainWindow):
 
 
 def main():
+    # Set global exception hook
+    sys.excepthook = global_exception_hook
+    
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
+    
+    # High DPI support
+    # Note: PyQt6 enables high DPI by default, but we set these for compatibility if using PyQt5 or specific environments
+    if hasattr(Qt.ApplicationAttribute, 'AA_EnableHighDpiScaling'):
+        app.setAttribute(Qt.ApplicationAttribute.AA_EnableHighDpiScaling, True)
+    if hasattr(Qt.ApplicationAttribute, 'AA_UseHighDpiPixmaps'):
+        app.setAttribute(Qt.ApplicationAttribute.AA_UseHighDpiPixmaps, True)
+        
+    # Set application icon if available
+    # app.setWindowIcon(QIcon('resources/icon.ico'))
+
     window = GeologicalModelingApp()
     window.showMaximized() # 默认最大化启动
     sys.exit(app.exec())

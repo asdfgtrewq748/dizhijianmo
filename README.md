@@ -117,6 +117,20 @@ run_qt.bat
 
 **详细文档**：[PYQT_FEATURES.md](PYQT_FEATURES.md)
 
+### 打包发布
+
+使用 PyInstaller 将应用打包为独立可执行文件：
+
+```bash
+# 安装 PyInstaller
+pip install pyinstaller
+
+# 运行打包脚本
+python build_app.py
+```
+
+打包完成后，可执行文件位于 `dist/GNN_GeoMod/GNN_GeoMod.exe`。
+
 ---
 
 ### 方式二：命令行工具

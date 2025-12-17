@@ -10,7 +10,11 @@ pandas>=2.0.0
 scipy>=1.10.0
 scikit-learn>=1.2.0
 
-# 可视化
+# GUI & 可视化
+PyQt6>=6.5.0
+pyvista>=0.42.0
+pyvistaqt>=0.11.0
+matplotlib>=3.7.0
 plotly>=5.15.0
 streamlit>=1.28.0
 

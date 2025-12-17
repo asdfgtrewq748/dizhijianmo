@@ -77,6 +77,24 @@ class EnhancedFLAC3DExporter:
             'min_thickness': float('inf'),
             'max_thickness': 0,
             'negative_volume_zones': 0,
+            'negative_zone_ids': [],
+            'max_node_usage': 0,
+            'avg_node_usage': 0.0,
+            'z_layer_count': 0,
+            'fixed_negative_zones': 0,
+            'skipped_zones': 0,
+            'max_aspect_ratio': 0.0,
+        }
+
+        self._last_coord_offset: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+        self._last_coord_precision: int = 6
+
+        # 默认岩性材料参数（可被调用方覆盖）
+        self.rock_properties: Dict[str, Dict[str, float]] = {
+            'coal': {'dens': 1400, 'bulk': 2.5e9, 'shear': 1.2e9, 'cohesion': 1.5e6, 'friction': 30},
+            'mudstone': {'dens': 2400, 'bulk': 8e9, 'shear': 4e9, 'cohesion': 3e6, 'friction': 35},
+            'sandstone': {'dens': 2600, 'bulk': 15e9, 'shear': 10e9, 'cohesion': 8e6, 'friction': 40},
+            'limestone': {'dens': 2700, 'bulk': 25e9, 'shear': 15e9, 'cohesion': 12e6, 'friction': 45},
         }
 
     def export(self, data: Dict[str, Any], output_path: str,
@@ -102,7 +120,8 @@ class EnhancedFLAC3DExporter:
         normalize_coords = options.get('normalize_coords', True)
         validate_mesh = options.get('validate_mesh', True)
         min_thickness = float(options.get('min_thickness', 0.01))
-        coord_precision = int(options.get('coord_precision', 6))
+        coord_precision = int(options.get('coord_precision', 8))
+        self._last_coord_precision = coord_precision
 
         layers = data.get('layers', [])
         if not layers:
@@ -121,6 +140,7 @@ class EnhancedFLAC3DExporter:
 
         # 计算坐标偏移
         coord_offset = self._calculate_offset(layers, normalize_coords)
+        self._last_coord_offset = coord_offset
         print(f"坐标偏移: X={coord_offset[0]:.2f}, Y={coord_offset[1]:.2f}, Z={coord_offset[2]:.2f}")
 
         # 强制层间连续性
@@ -131,13 +151,18 @@ class EnhancedFLAC3DExporter:
         self._generate_mesh(layers, downsample, coord_offset, coord_precision, min_thickness)
 
         # 验证网格
+        quality_report_path = None
         if validate_mesh:
             print(f"\n--- 网格验证 ---")
-            self._validate_mesh()
+            quality_report_path = self._validate_mesh(output_path)
 
         # 写入文件
         output_path = str(Path(output_path).with_suffix('.f3dat'))
         self._write_flac3d_script(output_path)
+
+        # 输出质量报告路径（如有）
+        if quality_report_path:
+            print(f"质量报告: {quality_report_path}")
 
         # 打印统计
         self._print_statistics()
@@ -165,6 +190,13 @@ class EnhancedFLAC3DExporter:
             'min_thickness': float('inf'),
             'max_thickness': 0,
             'negative_volume_zones': 0,
+            'negative_zone_ids': [],
+            'max_node_usage': 0,
+            'avg_node_usage': 0.0,
+            'z_layer_count': 0,
+            'fixed_negative_zones': 0,
+            'skipped_zones': 0,
+            'max_aspect_ratio': 0.0,
         }
 
     def _calculate_offset(self, layers: List[Dict], normalize: bool) -> Tuple[float, float, float]:
@@ -346,12 +378,28 @@ class EnhancedFLAC3DExporter:
                     # 注意: FLAC3D使用1-based索引,但我们的node_ids已经是从1开始
                     node_ids = [n0, n1, n3, n2, n4, n5, n7, n6]  # 调整顺序以匹配FLAC3D
 
-                    # 检查体积 (确保正体积)
+                    # 检查体积 (确保正体积)，尝试修复
                     volume = self._calculate_hex_volume(node_ids)
                     if volume < 0:
                         self.stats['negative_volume_zones'] += 1
-                        # 翻转节点顺序
-                        node_ids = [n0, n3, n1, n2, n4, n7, n5, n6]
+                        self.stats['negative_zone_ids'].append(self._next_zone_id)
+
+                        # 尝试翻转节点顺序修复
+                        alt_node_ids = [n0, n3, n1, n2, n4, n7, n5, n6]
+                        alt_vol = self._calculate_hex_volume(alt_node_ids)
+                        if alt_vol > 0:
+                            node_ids = alt_node_ids
+                            volume = alt_vol
+                            self.stats['fixed_negative_zones'] += 1
+                        else:
+                            # 无法修复则跳过该单元
+                            self.stats['skipped_zones'] += 1
+                            continue
+
+                    # 估算长细比，记录最大值
+                    aspect = self._estimate_aspect_ratio(node_ids)
+                    if aspect > self.stats['max_aspect_ratio']:
+                        self.stats['max_aspect_ratio'] = aspect
 
                     # 创建单元
                     zone = FLAC3DZone(
@@ -397,8 +445,22 @@ class EnhancedFLAC3DExporter:
 
         return total_volume
 
-    def _validate_mesh(self):
-        """验证网格质量"""
+    def _estimate_aspect_ratio(self, node_ids: List[int]) -> float:
+        """粗略估算单元长细比，避免极端扁薄单元"""
+        coords = []
+        for nid in node_ids:
+            node = self._node_lookup[nid]
+            coords.append(np.array([node.x, node.y, node.z]))
+        coords = np.vstack(coords)
+
+        span = coords.max(axis=0) - coords.min(axis=0)
+        max_len = float(span.max())
+        min_len = float(span.min())
+        min_len = min_len if min_len > 1e-6 else 1e-6
+        return max_len / min_len
+
+    def _validate_mesh(self, output_path: str) -> Optional[str]:
+        """验证网格质量并输出报告"""
         print(f"  检查节点连续性...")
 
         # 检查每个节点被多少个单元共享
@@ -414,6 +476,8 @@ class EnhancedFLAC3DExporter:
 
         print(f"    节点最大共享数: {max_usage}")
         print(f"    节点平均共享数: {avg_usage:.2f}")
+        self.stats['max_node_usage'] = max_usage
+        self.stats['avg_node_usage'] = float(avg_usage)
 
         # 检查层间节点共享
         print(f"  验证层间节点共享...")
@@ -428,6 +492,7 @@ class EnhancedFLAC3DExporter:
 
         z_values = sorted(z_layers.keys())
         print(f"    发现 {len(z_values)} 个Z层面")
+        self.stats['z_layer_count'] = len(z_values)
 
         # 检查相邻层是否共享节点
         for i in range(1, len(z_values)):
@@ -439,6 +504,43 @@ class EnhancedFLAC3DExporter:
 
             # 在层间应该有共享节点 (通过坐标匹配)
             print(f"    层面 Z={lower_z:.2f} -> Z={upper_z:.2f}: 间距 {gap:.4f}m, 节点数 {len(lower_nodes)}/{len(upper_nodes)}")
+
+        # 生成质量报告
+        report_path = str(Path(output_path).with_suffix('.quality.txt'))
+        try:
+            with open(report_path, 'w', encoding='utf-8') as rpt:
+                rpt.write("FLAC3D Mesh Quality Report\n")
+                rpt.write("==========================\n\n")
+                rpt.write(f"Total nodes: {self.stats['total_nodes']}\n")
+                rpt.write(f"Shared nodes: {self.stats['shared_nodes']}\n")
+                rpt.write(f"Total zones: {self.stats['total_zones']}\n")
+                rpt.write(f"Groups: {len(self.groups)}\n")
+                rpt.write(f"Z layers: {self.stats['z_layer_count']}\n")
+                rpt.write(f"Thickness range: {self.stats['min_thickness']:.4f} - {self.stats['max_thickness']:.4f} m\n\n")
+
+                rpt.write("Node usage\n")
+                rpt.write(f"  Max shared: {self.stats['max_node_usage']}\n")
+                rpt.write(f"  Avg shared: {self.stats['avg_node_usage']:.2f}\n\n")
+
+                rpt.write("Volumes\n")
+                rpt.write(f"  Negative volume zones: {self.stats['negative_volume_zones']}\n")
+                rpt.write(f"  Fixed negative zones: {self.stats['fixed_negative_zones']}\n")
+                rpt.write(f"  Skipped zones (unfixed): {self.stats['skipped_zones']}\n")
+                if self.stats['negative_zone_ids']:
+                    sample_ids = self.stats['negative_zone_ids'][:20]
+                    rpt.write(f"  Sample zone ids: {sample_ids}\n")
+                rpt.write("\n")
+
+                rpt.write("Geometry\n")
+                rpt.write(f"  Max aspect ratio: {self.stats['max_aspect_ratio']:.3f}\n")
+
+                rpt.write("Coordinates\n")
+                rpt.write(f"  Offset: {self._last_coord_offset}\n")
+                rpt.write(f"  Precision: {self._last_coord_precision}\n")
+
+            return report_path
+        except Exception:
+            return None
 
     def _sanitize_name(self, name: str) -> str:
         """清理组名"""
@@ -529,6 +631,27 @@ class EnhancedFLAC3DExporter:
 
                 f.write("\n")
 
+            # 材料属性
+            f.write("; ============================================\n")
+            f.write("; Assign material properties (auto-mapped)\n")
+            f.write("; ============================================\n")
+            for group_name, group in self.groups.items():
+                props = self._get_material_props(group_name)
+                if not props:
+                    continue
+
+                batch_size = 200
+                for i in range(0, len(group.zone_ids), batch_size):
+                    batch = group.zone_ids[i:i+batch_size]
+                    zone_list = ' '.join(str(zid) for zid in batch)
+                    f.write(
+                        "zone property "
+                        f"dens={props['dens']} bulk={props['bulk']} shear={props['shear']} "
+                        f"cohesion={props['cohesion']} friction={props['friction']} "
+                        f"range id {zone_list}\n"
+                    )
+            f.write("\n")
+
             # 验证信息
             f.write("; ============================================\n")
             f.write("; Verify mesh\n")
@@ -558,12 +681,27 @@ class EnhancedFLAC3DExporter:
         print(f"分组数: {len(self.groups)}")
         print(f"厚度范围: {self.stats['min_thickness']:.4f}m - {self.stats['max_thickness']:.4f}m")
         if self.stats['negative_volume_zones'] > 0:
-            print(f"警告: 修复了 {self.stats['negative_volume_zones']} 个负体积单元")
+            print(f"警告: 检测到 {self.stats['negative_volume_zones']} 个负体积单元，修复 {self.stats['fixed_negative_zones']}，跳过 {self.stats['skipped_zones']}")
+        print(f"最大长细比: {self.stats['max_aspect_ratio']:.3f}")
 
         # 按分组统计
         print(f"\n分组详情:")
         for name, group in self.groups.items():
             print(f"  {name}: {len(group.zone_ids)} 单元")
+
+    def _get_material_props(self, group_name: str) -> Optional[Dict[str, float]]:
+        """根据组名选择材料参数"""
+        key = group_name.lower()
+        if key in self.rock_properties:
+            return self.rock_properties[key]
+
+        # 宽松匹配
+        for rock_key in self.rock_properties.keys():
+            if rock_key in key:
+                return self.rock_properties[rock_key]
+
+        # 默认使用砂岩参数
+        return self.rock_properties.get('sandstone')
 
 
 def export_for_flac3d(data: Dict[str, Any], output_path: str,
