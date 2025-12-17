@@ -766,6 +766,56 @@ class GeologicalModelingApp(QMainWindow):
         modeling_group.setLayout(modeling_layout)
         layout.addWidget(modeling_group)
 
+        # 交互与分析
+        interact_group = QGroupBox("🛠️ 交互与分析")
+        interact_layout = QVBoxLayout()
+        interact_layout.setSpacing(10)
+
+        # Z轴拉伸
+        interact_layout.addWidget(QLabel("垂直夸张 (Z-Scale):"))
+        z_scale_layout = QHBoxLayout()
+        self.z_scale_slider = QSlider(Qt.Orientation.Horizontal)
+        self.z_scale_slider.setRange(10, 100) # 1.0 - 10.0
+        self.z_scale_slider.setValue(10)
+        self.z_scale_slider.valueChanged.connect(self.on_z_scale_changed)
+        self.z_scale_label = QLabel("1.0x")
+        z_scale_layout.addWidget(self.z_scale_slider)
+        z_scale_layout.addWidget(self.z_scale_label)
+        interact_layout.addLayout(z_scale_layout)
+
+        # 剖面切割
+        self.slice_cb = QCheckBox("启用剖面切割")
+        self.slice_cb.stateChanged.connect(self.on_slice_toggled)
+        interact_layout.addWidget(self.slice_cb)
+        
+        self.slice_controls = QWidget()
+        slice_layout = QVBoxLayout(self.slice_controls)
+        slice_layout.setContentsMargins(0,0,0,0)
+        
+        slice_layout.addWidget(QLabel("切割方向:"))
+        self.slice_axis_combo = QComboBox()
+        self.slice_axis_combo.addItems(['X轴', 'Y轴', 'Z轴', '任意'])
+        self.slice_axis_combo.currentTextChanged.connect(self.on_slice_axis_changed)
+        slice_layout.addWidget(self.slice_axis_combo)
+        
+        slice_layout.addWidget(QLabel("位置:"))
+        self.slice_pos_slider = QSlider(Qt.Orientation.Horizontal)
+        self.slice_pos_slider.setRange(0, 100)
+        self.slice_pos_slider.setValue(50)
+        self.slice_pos_slider.valueChanged.connect(self.on_slice_pos_changed)
+        slice_layout.addWidget(self.slice_pos_slider)
+        
+        self.slice_controls.setVisible(False)
+        interact_layout.addWidget(self.slice_controls)
+
+        # 钻孔拾取
+        self.pick_borehole_cb = QCheckBox("启用钻孔点击")
+        self.pick_borehole_cb.stateChanged.connect(self.on_pick_mode_toggled)
+        interact_layout.addWidget(self.pick_borehole_cb)
+
+        interact_group.setLayout(interact_layout)
+        layout.addWidget(interact_group)
+
         # 渲染控制
         render_group = QGroupBox("🎨 渲染控制")
         render_layout = QVBoxLayout()
@@ -814,6 +864,44 @@ class GeologicalModelingApp(QMainWindow):
 
         render_group.setLayout(render_layout)
         layout.addWidget(render_group)
+
+        # 高级功能
+        advanced_group = QGroupBox("🚀 高级功能")
+        advanced_layout = QVBoxLayout()
+        advanced_layout.setSpacing(10)
+
+        # 等值线
+        self.contour_cb = QCheckBox("显示等值线")
+        self.contour_cb.stateChanged.connect(self.on_contour_toggled)
+        advanced_layout.addWidget(self.contour_cb)
+
+        self.contour_params_widget = QWidget()
+        contour_layout = QVBoxLayout(self.contour_params_widget)
+        contour_layout.setContentsMargins(0, 0, 0, 0)
+        
+        contour_layout.addWidget(QLabel("类型:"))
+        self.contour_type_combo = QComboBox()
+        self.contour_type_combo.addItems(['底板高程', '地层厚度'])
+        self.contour_type_combo.currentTextChanged.connect(self.on_contour_params_changed)
+        contour_layout.addWidget(self.contour_type_combo)
+
+        contour_layout.addWidget(QLabel("间距(m):"))
+        self.contour_interval_spin = QDoubleSpinBox()
+        self.contour_interval_spin.setRange(1.0, 100.0)
+        self.contour_interval_spin.setValue(10.0)
+        self.contour_interval_spin.valueChanged.connect(self.on_contour_params_changed)
+        contour_layout.addWidget(self.contour_interval_spin)
+        
+        self.contour_params_widget.setVisible(False)
+        advanced_layout.addWidget(self.contour_params_widget)
+
+        # 漫游模式
+        self.fly_mode_cb = QCheckBox("虚拟漫游模式 (WASD)")
+        self.fly_mode_cb.stateChanged.connect(self.on_fly_mode_toggled)
+        advanced_layout.addWidget(self.fly_mode_cb)
+
+        advanced_group.setLayout(advanced_layout)
+        layout.addWidget(advanced_group)
 
         # 导出
         export_group = QGroupBox("💾 导出")
@@ -1192,6 +1280,119 @@ class GeologicalModelingApp(QMainWindow):
 
         self.modeler.start()
 
+    def on_z_scale_changed(self, value):
+        """Z轴缩放改变"""
+        scale = value / 10.0
+        self.z_scale_label.setText(f"{scale:.1f}x")
+        if self.plotter:
+            self.plotter.set_scale(zscale=scale)
+
+    def on_slice_toggled(self, state):
+        """剖面切割开关"""
+        is_checked = (state == Qt.CheckState.Checked.value)
+        self.slice_controls.setVisible(is_checked)
+        self.render_3d_model()
+
+    def on_slice_axis_changed(self, text):
+        """切割轴改变"""
+        if self.slice_cb.isChecked():
+            self.render_3d_model()
+
+    def on_slice_pos_changed(self, value):
+        """切割位置改变"""
+        if not self.slice_cb.isChecked() or not hasattr(self, 'active_plane_widget'):
+            return
+            
+        # 更新切割平面位置
+        axis = self.slice_axis_combo.currentText()
+        if axis == '任意':
+            return
+            
+        # 获取模型边界
+        bounds = self.plotter.bounds
+        # bounds: [xmin, xmax, ymin, ymax, zmin, zmax]
+        
+        pos_ratio = value / 100.0
+        
+        origin = list(self.plotter.center)
+        normal = (1, 0, 0)
+        
+        if axis == 'X轴':
+            origin[0] = bounds[0] + (bounds[1] - bounds[0]) * pos_ratio
+            normal = (1, 0, 0)
+        elif axis == 'Y轴':
+            origin[1] = bounds[2] + (bounds[3] - bounds[2]) * pos_ratio
+            normal = (0, 1, 0)
+        elif axis == 'Z轴':
+            origin[2] = bounds[4] + (bounds[5] - bounds[4]) * pos_ratio
+            normal = (0, 0, 1)
+            
+        # 更新平面部件
+        self.active_plane_widget.SetOrigin(origin)
+        self.active_plane_widget.SetNormal(normal)
+        self.active_plane_widget.UpdatePlacement()
+        self.plotter.render()
+
+    def on_pick_mode_toggled(self, state):
+        """钻孔拾取开关"""
+        if state == Qt.CheckState.Checked.value:
+            self.plotter.enable_point_picking(callback=self.on_borehole_picked, show_message=False, show_point=False)
+            self.log("已启用钻孔拾取: 请点击红色钻孔标记")
+        else:
+            self.plotter.disable_picking()
+            self.log("已禁用钻孔拾取")
+
+    def on_borehole_picked(self, point, actor):
+        """钻孔被点击"""
+        if not self.data_result or 'borehole_coords' not in self.data_result:
+            return
+            
+        # 查找最近的钻孔
+        coords = self.data_result['borehole_coords']
+        ids = self.data_result['borehole_ids']
+        
+        # 只比较X,Y距离，忽略Z
+        dists = np.sqrt((coords[:, 0] - point[0])**2 + (coords[:, 1] - point[1])**2)
+        min_idx = np.argmin(dists)
+        min_dist = dists[min_idx]
+        
+        if min_dist > 50: # 阈值，避免误触
+            return
+            
+        bh_id = ids[min_idx]
+        self.log(f"选中钻孔: {bh_id}")
+        
+        # 显示详情
+        if 'raw_df' in self.data_result:
+            df = self.data_result['raw_df']
+            bh_data = df[df['borehole_id'] == bh_id].sort_values('layer_order')
+            
+            dialog = BoreholeInfoDialog(bh_id, bh_data, self)
+            dialog.show()
+
+    def on_contour_toggled(self, state):
+        """等值线开关"""
+        is_checked = (state == Qt.CheckState.Checked.value)
+        self.contour_params_widget.setVisible(is_checked)
+        self.render_3d_model()
+
+    def on_contour_params_changed(self):
+        """等值线参数改变"""
+        if self.contour_cb.isChecked():
+            self.render_3d_model()
+
+    def on_fly_mode_toggled(self, state):
+        """漫游模式开关"""
+        if not self.plotter:
+            return
+            
+        if state == Qt.CheckState.Checked.value:
+            self.plotter.enable_terrain_style(mouse_wheel_zooms=True)
+            self.log("已启用漫游模式: 左键旋转，中键平移，右键缩放/前进")
+        else:
+            self.plotter.enable_trackball_style()
+            self.log("已恢复标准视图模式")
+
     def on_model_built(self, block_models, XI, YI):
         """三维模型构建完成"""
         self.block_models = block_models
@@ -1230,6 +1431,9 @@ class GeologicalModelingApp(QMainWindow):
     def render_3d_model(self):
         """渲染3D模型到PyVista窗口"""
         # self.log("正在渲染3D模型...") # 减少日志刷屏
+        
+        self.active_plane_widget = None
+
 
         try:
             # 保存当前相机视角
@@ -1246,6 +1450,7 @@ class GeologicalModelingApp(QMainWindow):
             show_edges = self.show_edges_cb.isChecked() if hasattr(self, 'show_edges_cb') else False
             opacity = self.opacity_slider.value() / 100.0 if hasattr(self, 'opacity_slider') else 0.9
             render_mode = self.render_mode_combo.currentText() if hasattr(self, 'render_mode_combo') else '基础渲染'
+            enable_slicing = self.slice_cb.isChecked() if hasattr(self, 'slice_cb') else False
 
             selected_layers = set()
             if hasattr(self, 'layer_list'):
@@ -1288,75 +1493,121 @@ class GeologicalModelingApp(QMainWindow):
                     self.cached_meshes[bm.name] = (mesh, color)
                 self.cached_sides_state = show_sides
 
-            legend_entries = []
-            # 使用缓存的网格进行渲染
-            for bm in self.block_models:
-                # if bm.name not in selected_layers:
-                #     continue
+            # 剖面切割模式
+            if enable_slicing:
+                meshes_to_merge = []
+                for bm in self.block_models:
+                    if bm.name not in self.cached_meshes:
+                        continue
+                    # 即使未选中也可能需要参与切割？不，只切割显示的
+                    if bm.name not in selected_layers:
+                        continue
+                        
+                    mesh, color = self.cached_meshes[bm.name]
+                    
+                    # 复制并添加颜色标量
+                    mesh_copy = mesh.copy()
+                    rgb_color = (np.array(color) * 255).astype(np.uint8)
+                    mesh_copy.point_data['RGB'] = np.tile(rgb_color, (mesh_copy.n_points, 1))
+                    meshes_to_merge.append(mesh_copy)
                 
-                if bm.name not in self.cached_meshes:
-                    continue
-
-                mesh, color = self.cached_meshes[bm.name]
-                legend_entries.append((bm.name, color))
-                
-                # 智能透明度控制：选中的层使用滑块透明度，未选中的层极度透明作为背景
-                is_selected = bm.name in selected_layers
-                if is_selected:
-                    layer_opacity = opacity
-                else:
-                    layer_opacity = 0.05 # 背景层透明度 (5%)
-
-                if render_mode == '线框模式':
-                    self.plotter.add_mesh(
-                        mesh,
-                        color=color,
-                        style='wireframe',
-                        line_width=2 if is_selected else 1,
-                        opacity=layer_opacity * 0.5,
-                        name=bm.name
+                if meshes_to_merge:
+                    merged_mesh = meshes_to_merge[0].merge(meshes_to_merge[1:])
+                    
+                    # 确定切割参数
+                    axis = self.slice_axis_combo.currentText()
+                    normal = 'x'
+                    if axis == 'Y轴': normal = 'y'
+                    elif axis == 'Z轴': normal = 'z'
+                    
+                    # 添加带切割部件的网格
+                    actor = self.plotter.add_mesh_clip_plane(
+                        merged_mesh,
+                        normal=normal,
+                        scalars='RGB',
+                        rgb=True,
+                        opacity=opacity,
+                        show_edges=show_edges
                     )
-                elif render_mode == '真实纹理':
-                    # 纹理贴图模式
-                    if bm.name not in self.cached_textures:
-                        # 生成纹理
-                        tex_arr = TextureGenerator.generate_rock_texture(bm.name, size=(512, 512))
-                        self.cached_textures[bm.name] = pv.Texture(tex_arr)
                     
-                    texture = self.cached_textures[bm.name]
+                    # 获取平面部件以便后续控制
+                    if hasattr(self.plotter, 'plane_widgets') and self.plotter.plane_widgets:
+                        self.active_plane_widget = self.plotter.plane_widgets[-1]
                     
-                    # 确保网格有纹理坐标，如果没有则重新映射
-                    # 兼容不同版本的 PyVista
-                    has_t_coords = False
-                    if hasattr(mesh, 'active_t_coords'):
-                        has_t_coords = mesh.active_t_coords is not None
-                    elif hasattr(mesh, 'active_texture_coordinates'):
-                        has_t_coords = mesh.active_texture_coordinates is not None
+                    # 如果不是任意方向，应用滑块位置
+                    if axis != '任意':
+                        self.on_slice_pos_changed(self.slice_pos_slider.value())
+            
+            else:
+                legend_entries = []
+                # 使用缓存的网格进行渲染
+                for bm in self.block_models:
+                    # if bm.name not in selected_layers:
+                    #     continue
                     
-                    if not has_t_coords:
-                         c = mesh.center
-                         mesh.texture_map_to_plane(origin=c, point_u=(c[0]+1, c[1], c[2]), point_v=(c[0], c[1]+1, c[2]), inplace=True)
+                    if bm.name not in self.cached_meshes:
+                        continue
 
-                    self.plotter.add_mesh(
-                        mesh,
-                        texture=texture,
-                        opacity=layer_opacity,
-                        smooth_shading=True,
-                        show_edges=show_edges and is_selected, # 仅选中的层显示网格
-                        edge_color='#000000',
-                        line_width=1,
-                        name=bm.name
-                    )
+                    mesh, color = self.cached_meshes[bm.name]
+                    legend_entries.append((bm.name, color))
+                    
+                    # 智能透明度控制：选中的层使用滑块透明度，未选中的层极度透明作为背景
+                    is_selected = bm.name in selected_layers
+                    if is_selected:
+                        layer_opacity = opacity
+                    else:
+                        layer_opacity = 0.05 # 背景层透明度 (5%)
 
-                elif render_mode == '增强材质':
-                    # 获取PBR参数
-                    pbr_params = RockMaterial.get_pbr_params(bm.name)
-                    self.plotter.add_mesh(
-                        mesh,
-                        color=color,
-                        opacity=layer_opacity,
-                        smooth_shading=True,
-                        pbr=True,
+                    if render_mode == '线框模式':
+                        self.plotter.add_mesh(
+                            mesh,
+                            color=color,
+                            style='wireframe',
+                            line_width=2 if is_selected else 1,
+                            opacity=layer_opacity * 0.5,
+                            name=bm.name
+                        )
+                    elif render_mode == '真实纹理':
+                        # 纹理贴图模式
+                        if bm.name not in self.cached_textures:
+                            # 生成纹理
+                            tex_arr = TextureGenerator.generate_rock_texture(bm.name, size=(512, 512))
+                            self.cached_textures[bm.name] = pv.Texture(tex_arr)
+                        
+                        texture = self.cached_textures[bm.name]
+                        
+                        # 确保网格有纹理坐标，如果没有则重新映射
+                        # 兼容不同版本的 PyVista
+                        has_t_coords = False
+                        if hasattr(mesh, 'active_t_coords'):
+                            has_t_coords = mesh.active_t_coords is not None
+                        elif hasattr(mesh, 'active_texture_coordinates'):
+                            has_t_coords = mesh.active_texture_coordinates is not None
+                        
+                        if not has_t_coords:
+                             c = mesh.center
+                             mesh.texture_map_to_plane(origin=c, point_u=(c[0]+1, c[1], c[2]), point_v=(c[0], c[1]+1, c[2]), inplace=True)
+
+                        self.plotter.add_mesh(
+                            mesh,
+                            texture=texture,
+                            opacity=layer_opacity,
+                            smooth_shading=True,
+                            show_edges=show_edges and is_selected, # 仅选中的层显示网格
+                            edge_color='#000000',
+                            line_width=1,
+                            name=bm.name
+                        )
+
+                    elif render_mode == '增强材质':
+                        # 获取PBR参数
+                        pbr_params = RockMaterial.get_pbr_params(bm.name)
+                        self.plotter.add_mesh(
+                            mesh,
+                            color=color,
+                            opacity=layer_opacity,
+                            smooth_shading=True,
+                            pbr=True,
                         metallic=pbr_params.get('metallic', 0.1),
                         roughness=pbr_params.get('roughness', 0.6),
                         diffuse=0.8,
@@ -1381,6 +1632,54 @@ class GeologicalModelingApp(QMainWindow):
             if hasattr(self, 'show_boreholes_cb') and self.show_boreholes_cb.isChecked():
                 self.add_borehole_markers()
 
+            # 绘制等值线
+            if hasattr(self, 'contour_cb') and self.contour_cb.isChecked():
+                contour_type = self.contour_type_combo.currentText()
+                interval = self.contour_interval_spin.value()
+                
+                for bm in self.block_models:
+                    if bm.name not in selected_layers:
+                        continue
+                    
+                    try:
+                        # 构建网格用于计算等值线
+                        # 使用顶板作为显示位置，这样等值线浮在层面上方
+                        grid = pv.StructuredGrid(self.XI, self.YI, bm.top_surface)
+                        
+                        scalars_name = ""
+                        if contour_type == '底板高程':
+                            scalars_name = "Elevation"
+                            grid.point_data[scalars_name] = bm.bottom_surface.flatten()
+                        else: # 地层厚度
+                            scalars_name = "Thickness"
+                            thickness = bm.top_surface - bm.bottom_surface
+                            grid.point_data[scalars_name] = thickness.flatten()
+                        
+                        # 计算等值线数值范围
+                        data_min = grid.point_data[scalars_name].min()
+                        data_max = grid.point_data[scalars_name].max()
+                        
+                        if data_max > data_min:
+                            # 生成等值线值
+                            start_val = np.floor(data_min / interval) * interval
+                            levels = np.arange(start_val, data_max, interval)
+                            levels = levels[levels >= data_min]
+                            
+                            if len(levels) > 0:
+                                contours = grid.contour(isosurfaces=levels, scalars=scalars_name)
+                                
+                                line_color = 'white' if contour_type == '底板高程' else 'yellow'
+                                
+                                self.plotter.add_mesh(
+                                    contours, 
+                                    color=line_color, 
+                                    line_width=3, 
+                                    name=f"{bm.name}_contour",
+                                    render_lines_as_tubes=True
+                                )
+                    except Exception as e:
+                        print(f"等值线生成失败 ({bm.name}): {e}")
+
             # 添加图例
             if legend_entries:
                 self.plotter.add_legend(
@@ -1389,6 +1688,10 @@ class GeologicalModelingApp(QMainWindow):
                     border=True,
                     loc='lower right'
                 )
+
+            # 应用Z轴缩放
+            if hasattr(self, 'z_scale_slider'):
+                self.plotter.set_scale(zscale=self.z_scale_slider.value() / 10.0)
 
             # 恢复相机视角或重置
             if camera_pos:
@@ -1513,35 +1816,83 @@ class GeologicalModelingApp(QMainWindow):
         dialog.exec()
 
     def on_layer_selection_changed(self):
-        """层选择改变"""
-        if self.block_models is not None and hasattr(self, 'plotter') and self.plotter is not None:
-            self.refresh_render()
+        """层选择改变 - 实时更新"""
+        self.on_opacity_changed(self.opacity_slider.value())
 
     def on_render_mode_changed(self, mode: str):
         """渲染模式改变"""
         if self.block_models is not None:
-            self.refresh_render()
+            self.render_3d_model()
 
     def on_opacity_changed(self, value: int):
-        """透明度改变"""
+        """透明度改变 - 实时更新"""
         opacity = value / 100.0
         self.opacity_label.setText(f"{opacity:.2f}")
-        if self.block_models is not None:
-            self.refresh_render()
+        
+        if not self.plotter or not self.block_models:
+            return
+
+        # 获取选中层
+        selected_layers = set()
+        if hasattr(self, 'layer_list'):
+            for item in self.layer_list.selectedItems():
+                selected_layers.add(item.text())
+        else:
+            selected_layers = {bm.name for bm in self.block_models}
+            
+        # 尝试直接更新Actor属性，不重绘
+        updated = False
+        try:
+            for bm in self.block_models:
+                actor_name = bm.name
+                if actor_name in self.plotter.actors:
+                    actor = self.plotter.actors[actor_name]
+                    is_selected = bm.name in selected_layers
+                    
+                    target_opacity = opacity if is_selected else 0.05
+                    if hasattr(actor, 'prop'):
+                        actor.prop.opacity = target_opacity
+                        updated = True
+            
+            if updated:
+                self.plotter.render()
+            else:
+                # 如果没有找到actor，可能需要重绘
+                self.render_3d_model()
+        except:
+            self.render_3d_model()
 
     def on_sides_toggled(self):
         """侧面显示切换"""
         if self.block_models is not None:
-            self.refresh_render()
+            self.render_3d_model()
 
     def on_boreholes_toggled(self):
         """钻孔显示切换"""
         if self.block_models is not None:
-            self.refresh_render()
+            self.render_3d_model()
 
     def refresh_render(self):
         """刷新渲染"""
         if self.block_models is not None and PYVISTA_AVAILABLE and self.plotter is not None:
+            # 尝试轻量级更新网格显示
+            try:
+                show_edges = self.show_edges_cb.isChecked()
+                updated = False
+                for bm in self.block_models:
+                    actor_name = bm.name
+                    if actor_name in self.plotter.actors:
+                        actor = self.plotter.actors[actor_name]
+                        if hasattr(actor, 'prop'):
+                            actor.prop.show_edges = show_edges
+                            updated = True
+                
+                if updated:
+                    self.plotter.render()
+                    return
+            except:
+                pass
+                
             self.render_3d_model()
 
     def export_model(self, format_type: str):
