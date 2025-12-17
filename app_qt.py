@@ -32,7 +32,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QLabel, QComboBox, QSpinBox, QDoubleSpinBox,
     QGroupBox, QTextEdit, QProgressBar, QTabWidget, QCheckBox,
     QSplitter, QSlider, QListWidget, QMessageBox, QFileDialog,
-    QScrollArea, QFrame
+    QScrollArea, QFrame, QDialog, QTableWidget, QTableWidgetItem, QHeaderView
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QFont, QTextCursor
@@ -313,6 +313,65 @@ class ModelingThread(QThread):
         except Exception as e:
             import traceback
             self.error.emit(f"建模失败: {str(e)}\n{traceback.format_exc()}")
+
+
+# =============================================================================
+# 钻孔信息对话框
+# =============================================================================
+
+class BoreholeInfoDialog(QDialog):
+    """显示钻孔详细信息的对话框"""
+    def __init__(self, borehole_id, df_layers, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"钻孔详情: {borehole_id}")
+        self.resize(600, 400)
+        self.setStyleSheet("""
+            QDialog { background-color: #1e1e2e; color: #cdd6f4; }
+            QTableWidget { 
+                background-color: #181825; 
+                color: #cdd6f4; 
+                gridline-color: #45475a;
+                border: 1px solid #45475a;
+            }
+            QHeaderView::section {
+                background-color: #313244;
+                color: #cdd6f4;
+                padding: 4px;
+                border: 1px solid #45475a;
+            }
+            QTableWidget::item:selected { background-color: #45475a; }
+        """)
+
+        layout = QVBoxLayout(self)
+
+        # 标题信息
+        info_layout = QHBoxLayout()
+        info_layout.addWidget(QLabel(f"<h3>钻孔编号: {borehole_id}</h3>"))
+        
+        # 计算总深度
+        total_depth = df_layers['bottom_depth'].max() if not df_layers.empty else 0
+        info_layout.addWidget(QLabel(f"总深度: {total_depth:.2f} m"))
+        
+        info_layout.addStretch()
+        layout.addLayout(info_layout)
+
+        # 表格
+        self.table = QTableWidget()
+        self.table.setColumnCount(5)
+        self.table.setHorizontalHeaderLabels(["层序", "地层名称", "岩性", "厚度(m)", "底板深度(m)"])
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.table.verticalHeader().setVisible(False)
+        
+        # 填充数据
+        self.table.setRowCount(len(df_layers))
+        for i, (_, row) in enumerate(df_layers.iterrows()):
+            self.table.setItem(i, 0, QTableWidgetItem(str(row.get('layer_order', i+1))))
+            self.table.setItem(i, 1, QTableWidgetItem(str(row.get('layer_name', ''))))
+            self.table.setItem(i, 2, QTableWidgetItem(str(row.get('lithology', ''))))
+            self.table.setItem(i, 3, QTableWidgetItem(f"{row.get('thickness', 0):.2f}"))
+            self.table.setItem(i, 4, QTableWidgetItem(f"{row.get('bottom_depth', 0):.2f}"))
+
+        layout.addWidget(self.table)
 
 
 # =============================================================================
@@ -1221,13 +1280,15 @@ class GeologicalModelingApp(QMainWindow):
                     if render_mode == '真实纹理':
                         try:
                             # 简单的平面投影映射
-                            mesh.texture_map_to_plane(origin=mesh.center, normal=(0, 0, 1), inplace=True)
+                            c = mesh.center
+                            mesh.texture_map_to_plane(origin=c, point_u=(c[0]+1, c[1], c[2]), point_v=(c[0], c[1]+1, c[2]), inplace=True)
                         except:
                             pass
                             
                     self.cached_meshes[bm.name] = (mesh, color)
                 self.cached_sides_state = show_sides
 
+            legend_entries = []
             # 使用缓存的网格进行渲染
             for bm in self.block_models:
                 # if bm.name not in selected_layers:
@@ -1237,6 +1298,7 @@ class GeologicalModelingApp(QMainWindow):
                     continue
 
                 mesh, color = self.cached_meshes[bm.name]
+                legend_entries.append((bm.name, color))
                 
                 # 智能透明度控制：选中的层使用滑块透明度，未选中的层极度透明作为背景
                 is_selected = bm.name in selected_layers
@@ -1264,8 +1326,16 @@ class GeologicalModelingApp(QMainWindow):
                     texture = self.cached_textures[bm.name]
                     
                     # 确保网格有纹理坐标，如果没有则重新映射
-                    if not mesh.active_t_coords:
-                         mesh.texture_map_to_plane(origin=mesh.center, normal=(0, 0, 1), inplace=True)
+                    # 兼容不同版本的 PyVista
+                    has_t_coords = False
+                    if hasattr(mesh, 'active_t_coords'):
+                        has_t_coords = mesh.active_t_coords is not None
+                    elif hasattr(mesh, 'active_texture_coordinates'):
+                        has_t_coords = mesh.active_texture_coordinates is not None
+                    
+                    if not has_t_coords:
+                         c = mesh.center
+                         mesh.texture_map_to_plane(origin=c, point_u=(c[0]+1, c[1], c[2]), point_v=(c[0], c[1]+1, c[2]), inplace=True)
 
                     self.plotter.add_mesh(
                         mesh,
@@ -1311,12 +1381,30 @@ class GeologicalModelingApp(QMainWindow):
             if hasattr(self, 'show_boreholes_cb') and self.show_boreholes_cb.isChecked():
                 self.add_borehole_markers()
 
+            # 添加图例
+            if legend_entries:
+                self.plotter.add_legend(
+                    legend_entries,
+                    bcolor=(0.15, 0.15, 0.2),
+                    border=True,
+                    loc='lower right'
+                )
+
             # 恢复相机视角或重置
             if camera_pos:
                 self.plotter.camera_position = camera_pos
             else:
                 self.plotter.reset_camera()
                 self.plotter.view_isometric()
+
+            # 启用拾取 (允许点击钻孔)
+            if hasattr(self, 'show_boreholes_cb') and self.show_boreholes_cb.isChecked():
+                self.plotter.enable_mesh_picking(
+                    self.on_borehole_picked,
+                    show=False,
+                    show_message=False,
+                    left_clicking=True
+                )
 
             # self.log("✓ 3D模型渲染完成")
 
@@ -1352,6 +1440,10 @@ class GeologicalModelingApp(QMainWindow):
                     resolution=20
                 )
                 
+                # 添加钻孔ID到网格数据，用于拾取
+                # 注意：PyVista的field_data需要是数组
+                cylinder.field_data['borehole_id'] = [str(borehole_ids[i])]
+
                 self.plotter.add_mesh(
                     cylinder,
                     color='#ff5555',
@@ -1375,6 +1467,50 @@ class GeologicalModelingApp(QMainWindow):
 
         except Exception as e:
             self.log(f"添加钻孔标记失败: {str(e)}")
+
+    def on_borehole_picked(self, mesh):
+        """钻孔拾取回调"""
+        if mesh is None:
+            return
+            
+        # 检查是否有钻孔ID
+        # PyVista的field_data通常是pyvista.DataSetAttributes
+        if mesh.field_data and 'borehole_id' in mesh.field_data:
+            try:
+                # 获取ID
+                bid_data = mesh.field_data['borehole_id']
+                if len(bid_data) > 0:
+                    borehole_id = bid_data[0]
+                    # 如果是bytes类型(vtk有时会这样)，解码
+                    if isinstance(borehole_id, bytes):
+                        borehole_id = borehole_id.decode('utf-8')
+                    self.show_borehole_details(borehole_id)
+            except Exception as e:
+                print(f"Pick error: {e}")
+
+    def show_borehole_details(self, borehole_id):
+        """显示钻孔详情"""
+        if self.data_result is None or 'raw_df' not in self.data_result:
+            return
+            
+        df = self.data_result['raw_df']
+        # 筛选该钻孔的数据
+        # 确保类型一致
+        borehole_df = df[df['borehole_id'].astype(str) == str(borehole_id)].copy()
+            
+        if borehole_df.empty:
+            self.log(f"未找到钻孔 {borehole_id} 的详细数据")
+            return
+            
+        # 按深度排序
+        if 'top_depth' in borehole_df.columns:
+            borehole_df = borehole_df.sort_values('top_depth')
+        elif 'layer_order' in borehole_df.columns:
+            borehole_df = borehole_df.sort_values('layer_order')
+        
+        # 显示对话框
+        dialog = BoreholeInfoDialog(borehole_id, borehole_df, self)
+        dialog.exec()
 
     def on_layer_selection_changed(self):
         """层选择改变"""
