@@ -316,11 +316,12 @@ def main():
         if layer_method == 'position_based':
             min_occurrence_rate = st.slider(
                 "最小出现率",
-                0.1, 0.8, 0.5,
-                help="只保留出现率高于此值的地层，提高此值可减少层数"
+                0.0, 0.5, 0.05,
+                step=0.05,
+                help="只保留出现率高于此值的地层。0.05表示至少在5%的钻孔中出现（约2个钻孔）。设为0可保留所有层。"
             )
         else:
-            min_occurrence_rate = 0.3
+            min_occurrence_rate = 0.05
         k_neighbors = st.slider("K邻居数", 4, 20, 10, help="增加邻居数可提高空间关联性")
 
         st.subheader("🔧 预测方法")
@@ -490,7 +491,7 @@ def main():
             df = result['raw_df']
             st.dataframe(
                 df[['borehole_id', 'x', 'y', 'lithology', 'thickness']].head(20),
-                use_container_width=True
+                width="stretch"
             )
 
             # 钻孔分布图
@@ -511,7 +512,7 @@ def main():
                 height=500,
                 showlegend=False
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
 
     # ==================== Tab 2: 模型训练 ====================
     with tab2:
@@ -756,7 +757,7 @@ def main():
                 st.subheader("各层拟合详情")
                 if hasattr(predictor, 'get_layer_summary'):
                     summary_df = predictor.get_layer_summary()
-                    st.dataframe(summary_df, use_container_width=True)
+                    st.dataframe(summary_df, width="stretch")
                 elif hasattr(predictor, 'layer_stats'):
                     stats_data = []
                     for layer_name in predictor.layer_order:
@@ -771,7 +772,7 @@ def main():
                             '标准差(m)': f"{stats.get('std', 0):.2f}"
                         })
                     if stats_data:
-                        st.dataframe(pd.DataFrame(stats_data), use_container_width=True)
+                        st.dataframe(pd.DataFrame(stats_data), width="stretch")
 
                 # 方法分布图
                 st.subheader("各层插值方法分布")
@@ -796,7 +797,7 @@ def main():
                         title="各层使用的插值方法",
                         height=350
                     )
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, width="stretch")
 
                 st.success("✅ 传统方法无需迭代训练，可直接进行三维建模!")
 
@@ -823,7 +824,7 @@ def main():
                     }
                     for r in cv_results['fold_results']
                 ])
-                st.dataframe(fold_df, use_container_width=True)
+                st.dataframe(fold_df, width="stretch")
 
                 # 可视化各fold的性能
                 fig = go.Figure()
@@ -839,7 +840,7 @@ def main():
                     height=400,
                     barmode='group'
                 )
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
 
             # 普通训练结果显示
             elif st.session_state.history is not None:
@@ -861,7 +862,7 @@ def main():
                     yaxis_title='Loss',
                     height=400
                 )
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
 
                 # MAE曲线
                 fig2 = go.Figure()
@@ -878,7 +879,7 @@ def main():
                     yaxis_title='MAE (m)',
                     height=400
                 )
-                st.plotly_chart(fig2, use_container_width=True)
+                st.plotly_chart(fig2, width="stretch")
 
                 # 测试指标
                 if 'test_metrics' in history:
@@ -1018,7 +1019,7 @@ def main():
                         '底面高程(m)': f"{bm.avg_bottom:.2f}",
                         '顶面高程(m)': f"{bm.avg_height:.2f}"
                     })
-                st.dataframe(pd.DataFrame(layer_info), use_container_width=True)
+                st.dataframe(pd.DataFrame(layer_info), width="stretch")
 
                 # 三维可视化
                 st.subheader("三维模型可视化")
@@ -1035,7 +1036,7 @@ def main():
                     show_layers = st.multiselect(
                         "选择显示的地层",
                         result['layer_order'],
-                        default=result['layer_order'][:min(5, len(result['layer_order']))]
+                        default=result['layer_order']  # 默认显示所有岩层
                     )
 
                 with col_opt2:
@@ -1048,7 +1049,36 @@ def main():
 
                 with col_opt3:
                     show_sides = st.checkbox("显示侧面", value=True, help="显示地层侧面轮廓")
-                    surface_opacity = st.slider("透明度", 0.3, 1.0, 0.85)
+                    surface_opacity = st.slider("透明度", 0.3, 1.0, 0.9)
+
+                # 高级性能选项（默认最高质量，可调整以适应不同硬件）
+                with st.expander("⚙️ 高级性能选项", expanded=False):
+                    col_perf1, col_perf2 = st.columns(2)
+                    with col_perf1:
+                        preview_quality = st.selectbox(
+                            "预览质量",
+                            ['高质量', '平衡', '高性能'],
+                            index=0,
+                            help="高质量：完整分辨率，最佳效果；高性能：降采样显示"
+                        )
+                    with col_perf2:
+                        skip_bottom = st.checkbox("隐藏底面", value=False, help="隐藏底面可减少渲染量")
+
+                # 根据预览质量调整分辨率（默认高质量，无降采样）
+                if preview_quality == '高质量':
+                    downsample = 1  # 完整分辨率
+                elif preview_quality == '平衡':
+                    downsample = 2
+                else:  # 高性能
+                    downsample = 4
+
+                # 降采样网格
+                if downsample > 1:
+                    XI_display = XI[::downsample, ::downsample]
+                    YI_display = YI[::downsample, ::downsample]
+                else:
+                    XI_display = XI
+                    YI_display = YI
 
                 # 获取完整颜色映射（包含高光和阴影）
                 full_color_map = get_full_color_map(result['layer_order'])
@@ -1062,25 +1092,30 @@ def main():
                     colors = full_color_map[bm.name]
                     base_color = colors['base']
 
-                    if render_mode == '增强材质':
-                        # 生成纹理
-                        texture = generate_rock_texture(
-                            XI.shape, rock_type=bm.name, intensity=0.12
-                        )
-                        # 使用纹理作为surfacecolor
-                        surface_color = texture
+                    # 降采样曲面数据
+                    if downsample > 1:
+                        top_display = bm.top_surface[::downsample, ::downsample]
+                        bottom_display = bm.bottom_surface[::downsample, ::downsample]
+                    else:
+                        top_display = bm.top_surface
+                        bottom_display = bm.bottom_surface
 
-                        # 创建带纹理的colorscale
+                    if render_mode == '增强材质':
+                        # 生成纹理（使用降采样后的尺寸）
+                        texture = generate_rock_texture(
+                            XI_display.shape, rock_type=bm.name, intensity=0.12
+                        )
+                        surface_color = texture
                         colorscale = create_textured_colorscale(base_color)
 
-                        # 顶面 - 带纹理和光照
+                        # 顶面
                         fig.add_trace(go.Surface(
-                            x=XI, y=YI, z=bm.top_surface,
+                            x=XI_display, y=YI_display, z=top_display,
                             surfacecolor=surface_color,
                             colorscale=colorscale,
                             showscale=False,
                             opacity=surface_opacity,
-                            name=f"{bm.name} (顶)",
+                            name=f"{bm.name}",
                             lighting=dict(
                                 ambient=0.6,
                                 diffuse=0.8,
@@ -1089,31 +1124,24 @@ def main():
                                 fresnel=0.2
                             ),
                             lightposition=dict(x=1000, y=1000, z=2000),
-                            hovertemplate=f"<b>{bm.name}</b><br>X: %{{x:.1f}}m<br>Y: %{{y:.1f}}m<br>Z: %{{z:.1f}}m<extra></extra>"
+                            hovertemplate=f"<b>{bm.name}</b><br>Z: %{{z:.1f}}m<extra></extra>"
                         ))
 
-                        # 底面
-                        fig.add_trace(go.Surface(
-                            x=XI, y=YI, z=bm.bottom_surface,
-                            surfacecolor=surface_color * 0.8,  # 稍暗的纹理
-                            colorscale=colorscale,
-                            showscale=False,
-                            opacity=surface_opacity * 0.7,
-                            name=f"{bm.name} (底)",
-                            lighting=dict(
-                                ambient=0.5,
-                                diffuse=0.6,
-                                specular=0.2,
-                                roughness=0.9,
-                                fresnel=0.1
-                            ),
-                            hovertemplate=f"<b>{bm.name} 底面</b><br>X: %{{x:.1f}}m<br>Y: %{{y:.1f}}m<br>Z: %{{z:.1f}}m<extra></extra>"
-                        ))
+                        # 底面（可选）
+                        if not skip_bottom:
+                            fig.add_trace(go.Surface(
+                                x=XI_display, y=YI_display, z=bottom_display,
+                                surfacecolor=surface_color * 0.8,
+                                colorscale=colorscale,
+                                showscale=False,
+                                opacity=surface_opacity * 0.7,
+                                name=f"{bm.name} (底)",
+                                hoverinfo='skip'
+                            ))
 
                     elif render_mode == '线框模式':
-                        # 线框渲染
                         fig.add_trace(go.Surface(
-                            x=XI, y=YI, z=bm.top_surface,
+                            x=XI_display, y=YI_display, z=top_display,
                             colorscale=[[0, base_color], [1, base_color]],
                             showscale=False,
                             opacity=0.3,
@@ -1128,75 +1156,67 @@ def main():
                     else:
                         # 基础渲染
                         fig.add_trace(go.Surface(
-                            x=XI, y=YI, z=bm.top_surface,
+                            x=XI_display, y=YI_display, z=top_display,
                             colorscale=[[0, base_color], [1, base_color]],
                             showscale=False,
                             opacity=surface_opacity,
                             name=f"{bm.name}"
                         ))
 
-                    # 添加侧面
+                    # 添加侧面（优化：合并为单个trace）
                     if show_sides and render_mode != '线框模式':
                         shadow_color = colors.get('shadow', base_color)
+                        n = XI_display.shape[0]
 
-                        # 四个边的侧面
-                        n = XI.shape[0]
+                        # 合并所有侧面线条为一个trace（使用None分隔）
+                        x_all, y_all, z_all = [], [], []
 
-                        # 前侧面 (y=0)
-                        for i in range(n - 1):
-                            x_side = [XI[0, i], XI[0, i+1], XI[0, i+1], XI[0, i], XI[0, i]]
-                            y_side = [YI[0, i], YI[0, i+1], YI[0, i+1], YI[0, i], YI[0, i]]
-                            z_side = [bm.bottom_surface[0, i], bm.bottom_surface[0, i+1],
-                                     bm.top_surface[0, i+1], bm.top_surface[0, i], bm.bottom_surface[0, i]]
-                            fig.add_trace(go.Scatter3d(
-                                x=x_side, y=y_side, z=z_side,
-                                mode='lines',
-                                line=dict(color=shadow_color, width=1),
-                                showlegend=False,
-                                hoverinfo='skip'
-                            ))
+                        # 前侧面 (y=0) - 简化为边界线
+                        x_all.extend(XI_display[0, :].tolist() + [None])
+                        y_all.extend(YI_display[0, :].tolist() + [None])
+                        z_all.extend(top_display[0, :].tolist() + [None])
+                        x_all.extend(XI_display[0, :].tolist() + [None])
+                        y_all.extend(YI_display[0, :].tolist() + [None])
+                        z_all.extend(bottom_display[0, :].tolist() + [None])
 
                         # 后侧面 (y=max)
-                        for i in range(n - 1):
-                            x_side = [XI[-1, i], XI[-1, i+1], XI[-1, i+1], XI[-1, i], XI[-1, i]]
-                            y_side = [YI[-1, i], YI[-1, i+1], YI[-1, i+1], YI[-1, i], YI[-1, i]]
-                            z_side = [bm.bottom_surface[-1, i], bm.bottom_surface[-1, i+1],
-                                     bm.top_surface[-1, i+1], bm.top_surface[-1, i], bm.bottom_surface[-1, i]]
-                            fig.add_trace(go.Scatter3d(
-                                x=x_side, y=y_side, z=z_side,
-                                mode='lines',
-                                line=dict(color=shadow_color, width=1),
-                                showlegend=False,
-                                hoverinfo='skip'
-                            ))
+                        x_all.extend(XI_display[-1, :].tolist() + [None])
+                        y_all.extend(YI_display[-1, :].tolist() + [None])
+                        z_all.extend(top_display[-1, :].tolist() + [None])
+                        x_all.extend(XI_display[-1, :].tolist() + [None])
+                        y_all.extend(YI_display[-1, :].tolist() + [None])
+                        z_all.extend(bottom_display[-1, :].tolist() + [None])
 
                         # 左侧面 (x=0)
-                        for j in range(n - 1):
-                            x_side = [XI[j, 0], XI[j+1, 0], XI[j+1, 0], XI[j, 0], XI[j, 0]]
-                            y_side = [YI[j, 0], YI[j+1, 0], YI[j+1, 0], YI[j, 0], YI[j, 0]]
-                            z_side = [bm.bottom_surface[j, 0], bm.bottom_surface[j+1, 0],
-                                     bm.top_surface[j+1, 0], bm.top_surface[j, 0], bm.bottom_surface[j, 0]]
-                            fig.add_trace(go.Scatter3d(
-                                x=x_side, y=y_side, z=z_side,
-                                mode='lines',
-                                line=dict(color=shadow_color, width=1),
-                                showlegend=False,
-                                hoverinfo='skip'
-                            ))
+                        x_all.extend(XI_display[:, 0].tolist() + [None])
+                        y_all.extend(YI_display[:, 0].tolist() + [None])
+                        z_all.extend(top_display[:, 0].tolist() + [None])
+                        x_all.extend(XI_display[:, 0].tolist() + [None])
+                        y_all.extend(YI_display[:, 0].tolist() + [None])
+                        z_all.extend(bottom_display[:, 0].tolist() + [None])
 
                         # 右侧面 (x=max)
-                        for j in range(n - 1):
-                            x_side = [XI[j, -1], XI[j+1, -1], XI[j+1, -1], XI[j, -1], XI[j, -1]]
-                            y_side = [YI[j, -1], YI[j+1, -1], YI[j+1, -1], YI[j, -1], YI[j, -1]]
-                            z_side = [bm.bottom_surface[j, -1], bm.bottom_surface[j+1, -1],
-                                     bm.top_surface[j+1, -1], bm.top_surface[j, -1], bm.bottom_surface[j, -1]]
-                            fig.add_trace(go.Scatter3d(
-                                x=x_side, y=y_side, z=z_side,
-                                mode='lines',
-                                line=dict(color=shadow_color, width=1),
-                                showlegend=False,
-                                hoverinfo='skip'
-                            ))
+                        x_all.extend(XI_display[:, -1].tolist() + [None])
+                        y_all.extend(YI_display[:, -1].tolist() + [None])
+                        z_all.extend(top_display[:, -1].tolist() + [None])
+                        x_all.extend(XI_display[:, -1].tolist() + [None])
+                        y_all.extend(YI_display[:, -1].tolist() + [None])
+                        z_all.extend(bottom_display[:, -1].tolist() + [None])
+
+                        # 添加垂直连接线（只在角落）
+                        corners = [(0, 0), (0, -1), (-1, 0), (-1, -1)]
+                        for j, i in corners:
+                            x_all.extend([XI_display[j, i], XI_display[j, i], None])
+                            y_all.extend([YI_display[j, i], YI_display[j, i], None])
+                            z_all.extend([bottom_display[j, i], top_display[j, i], None])
+
+                        fig.add_trace(go.Scatter3d(
+                            x=x_all, y=y_all, z=z_all,
+                            mode='lines',
+                            line=dict(color=shadow_color, width=1),
+                            showlegend=False,
+                            hoverinfo='skip'
+                        ))
 
                 # 添加图例
                 for layer_name in show_layers:
@@ -1251,7 +1271,15 @@ def main():
                     )
                 )
 
-                st.plotly_chart(fig, use_container_width=True)
+                # 使用WebGL配置提升性能
+                config = {
+                    'displayModeBar': True,
+                    'scrollZoom': True,
+                    'responsive': True,
+                    'displaylogo': False,
+                    'modeBarButtonsToRemove': ['lasso2d', 'select2d'],
+                }
+                st.plotly_chart(fig, width="stretch", config=config)
 
                 # 显示颜色图例说明
                 st.markdown("---")
@@ -1359,7 +1387,7 @@ def main():
                                 # 显示 PNG 预览
                                 png_path = os.path.join(output_dir, 'geological_model.png')
                                 if os.path.exists(png_path):
-                                    st.image(png_path, caption="PyVista 渲染结果", use_container_width=True)
+                                    st.image(png_path, caption="PyVista 渲染结果", width="stretch")
 
                                 # 提供 HTML 下载链接
                                 html_path = os.path.join(output_dir, 'geological_model.html')
@@ -1440,7 +1468,7 @@ def main():
             yaxis_title='厚度 (m)',
             height=500
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
         # 导出选项
         st.subheader("模型导出")

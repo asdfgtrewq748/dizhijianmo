@@ -65,7 +65,8 @@
       "Bash(python -m py_compile \"E:\\xiangmu\\dizhijianmo\\app.py\")",
       "Bash(python -m py_compile \"E:\\xiangmu\\dizhijianmo\\src\\gnn_thickness_modeling.py\")",
       "Bash(python -m py_compile \"E:\\xiangmu\\dizhijianmo\\src\\thickness_predictor_v2.py\")",
-      "Bash(python -m py_compile \"E:\\xiangmu\\dizhijianmo\\src\\thickness_data_loader.py\")"
+      "Bash(python -m py_compile \"E:\\xiangmu\\dizhijianmo\\src\\thickness_data_loader.py\")",
+      "Bash(python -m py_compile \"E:\\xiangmu\\dizhijianmo\\src\\pyvista_renderer.py\")"
     ]
   }
 }

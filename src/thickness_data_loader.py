@@ -383,7 +383,8 @@ class ThicknessDataBuilder:
             for idx, lith in zip(sub['layer_order'].values, sub['lithology'].values):
                 positions.setdefault(lith, []).append(idx)
 
-        layer_order = sorted(positions.keys(), key=lambda k: np.median(positions[k]))
+        # 按位置降序（从底到顶，底部layer_order值大的在前）
+        layer_order = sorted(positions.keys(), key=lambda k: np.median(positions[k]), reverse=True)
 
         print("简单层序推断（从底到顶）- 警告：同种岩性被合并!")
         for i, name in enumerate(layer_order):
@@ -441,7 +442,11 @@ class ThicknessDataBuilder:
 
         # 创建层列表，每个(岩性, 出现序号)为一个独立层
         layer_list = []  # [(层名, 平均相对位置, 出现次数)]
+        # 最少需要2个点才能建模，如果min_occurrence_rate很低则使用2
         min_count = max(2, int(total_boreholes * min_occurrence_rate))
+
+        # 统计被过滤掉的层
+        filtered_layers = []
 
         for lith, max_occ in lith_max_occurrences.items():
             for occ in range(max_occ):
@@ -450,22 +455,32 @@ class ThicknessDataBuilder:
                     avg_pos = np.median(positions)
                     occurrence_count = len(positions)
 
+                    if max_occ > 1:
+                        layer_name = f"{lith}_{occ+1}"  # 粉砂岩_1, 粉砂岩_2, ...
+                    else:
+                        layer_name = lith  # 只出现一次的不加后缀
+
                     # 只有当出现次数足够多时才作为独立层
                     if occurrence_count >= min_count:
-                        if max_occ > 1:
-                            layer_name = f"{lith}_{occ+1}"  # 粉砂岩_1, 粉砂岩_2, ...
-                        else:
-                            layer_name = lith  # 只出现一次的不加后缀
                         layer_list.append((layer_name, avg_pos, occurrence_count))
+                    else:
+                        filtered_layers.append((layer_name, occurrence_count))
 
-        # 按相对位置排序（从顶到底 -> 从底到顶）
-        layer_list.sort(key=lambda x: x[1])  # 按位置升序（顶部=0，底部=1）
+        # 按相对位置排序（从底到顶，用于从底部向上累加建模）
+        layer_list.sort(key=lambda x: x[1], reverse=True)  # 按位置降序（底部=1先，顶部=0后）
 
         layer_order = [item[0] for item in layer_list]
 
-        print(f"\n[层序推断] 推断出 {len(layer_order)} 层（从顶到底）:")
+        print(f"\n[层序推断] 推断出 {len(layer_order)} 层（从底到顶，用于累加建模）:")
+        print(f"  (最小出现次数阈值: {min_count}个钻孔, 即{min_count*100/total_boreholes:.0f}%)")
         for i, (name, pos, count) in enumerate(layer_list):
             print(f"  {i}: {name} (相对位置={pos:.2f}, 出现{count}次, {count*100/total_boreholes:.0f}%)")
+
+        # 显示被过滤掉的层
+        if filtered_layers:
+            print(f"\n[警告] 以下 {len(filtered_layers)} 个层因出现次数不足被过滤:")
+            for name, count in sorted(filtered_layers, key=lambda x: x[1], reverse=True):
+                print(f"  - {name}: 仅{count}个钻孔")
 
         return layer_order
 

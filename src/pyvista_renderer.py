@@ -403,7 +403,14 @@ class GeologicalModelRenderer:
         for mesh in meshes[1:]:
             combined = combined.merge(mesh)
 
-        combined['layer_name'] = np.array([name] * combined.n_points, dtype=object)
+        # 尝试设置层名（PyVista对中文字符支持有限，使用fallback）
+        try:
+            # 尝试将名称编码为ASCII兼容格式
+            safe_name = name.encode('ascii', 'replace').decode('ascii')
+            combined['layer_name'] = np.array([safe_name] * combined.n_points, dtype='|S64')
+        except Exception:
+            # 如果失败，跳过层名设置
+            pass
 
         return combined
 
