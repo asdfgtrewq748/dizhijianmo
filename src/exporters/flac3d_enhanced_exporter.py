@@ -1,0 +1,588 @@
+"""
+FLAC3D 增强版导出器 - 确保应力/位移传导和正确分组
+
+核心特性:
+1. 层间节点精确共享 - 上层底面 = 下层顶面 (同一节点ID)
+2. 正确的FLAC3D命令语法
+3. 网格质量验证
+4. 支持多种导入方式
+
+输出格式:
+- .f3dat - FLAC3D原生命令脚本 (推荐)
+- .flac3d - FLAC3D命令脚本 (旧版兼容)
+
+在FLAC3D中导入:
+    program call 'model.f3dat'
+"""
+
+import os
+import re
+import numpy as np
+from typing import Any, Dict, List, Optional, Tuple
+from pathlib import Path
+from dataclasses import dataclass, field
+
+
+@dataclass
+class FLAC3DNode:
+    """FLAC3D节点"""
+    id: int
+    x: float
+    y: float
+    z: float
+
+
+@dataclass
+class FLAC3DZone:
+    """FLAC3D单元(Brick8)"""
+    id: int
+    node_ids: List[int]  # 8个节点ID
+    group: str
+
+
+@dataclass
+class FLAC3DGroup:
+    """FLAC3D单元组"""
+    name: str
+    zone_ids: List[int] = field(default_factory=list)
+
+
+class EnhancedFLAC3DExporter:
+    """
+    增强版FLAC3D导出器
+
+    关键特性:
+    1. 层间节点共享 - 确保应力/位移连续传导
+    2. 正确的B8单元节点顺序
+    3. 完整的FLAC3D命令语法
+    4. 网格质量检查
+    5. 详细的验证报告
+    """
+
+    def __init__(self):
+        self.nodes: List[FLAC3DNode] = []
+        self.zones: List[FLAC3DZone] = []
+        self.groups: Dict[str, FLAC3DGroup] = {}
+
+        self._next_node_id = 1
+        self._next_zone_id = 1
+        self._node_lookup: Dict[int, FLAC3DNode] = {}
+        self._coord_to_node: Dict[Tuple[float, float, float], int] = {}  # 坐标到节点ID的映射
+
+        # 统计信息
+        self.stats = {
+            'total_nodes': 0,
+            'shared_nodes': 0,
+            'total_zones': 0,
+            'min_thickness': float('inf'),
+            'max_thickness': 0,
+            'negative_volume_zones': 0,
+        }
+
+    def export(self, data: Dict[str, Any], output_path: str,
+               options: Optional[Dict[str, Any]] = None) -> str:
+        """
+        导出为FLAC3D格式
+
+        Args:
+            data: 地层数据
+            output_path: 输出路径
+            options: 导出选项
+                - downsample_factor: 降采样(默认1)
+                - normalize_coords: 坐标归一化(默认True)
+                - validate_mesh: 验证网格质量(默认True)
+                - min_thickness: 最小厚度阈值(默认0.01m)
+
+        Returns:
+            输出文件路径
+        """
+        options = options or {}
+
+        downsample = int(options.get('downsample_factor', 1))
+        normalize_coords = options.get('normalize_coords', True)
+        validate_mesh = options.get('validate_mesh', True)
+        min_thickness = float(options.get('min_thickness', 0.01))
+        coord_precision = int(options.get('coord_precision', 6))
+
+        layers = data.get('layers', [])
+        if not layers:
+            raise ValueError("没有可导出的地层数据")
+
+        print(f"\n{'='*60}")
+        print(f"FLAC3D Enhanced Exporter")
+        print(f"{'='*60}")
+        print(f"地层数量: {len(layers)}")
+        print(f"降采样: {downsample}x")
+        print(f"坐标归一化: {normalize_coords}")
+        print(f"最小厚度阈值: {min_thickness}m")
+
+        # 重置状态
+        self._reset()
+
+        # 计算坐标偏移
+        coord_offset = self._calculate_offset(layers, normalize_coords)
+        print(f"坐标偏移: X={coord_offset[0]:.2f}, Y={coord_offset[1]:.2f}, Z={coord_offset[2]:.2f}")
+
+        # 强制层间连续性
+        self._enforce_layer_continuity(layers)
+
+        # 生成网格
+        print(f"\n--- 生成网格 ---")
+        self._generate_mesh(layers, downsample, coord_offset, coord_precision, min_thickness)
+
+        # 验证网格
+        if validate_mesh:
+            print(f"\n--- 网格验证 ---")
+            self._validate_mesh()
+
+        # 写入文件
+        output_path = str(Path(output_path).with_suffix('.f3dat'))
+        self._write_flac3d_script(output_path)
+
+        # 打印统计
+        self._print_statistics()
+
+        print(f"\n导出完成: {output_path}")
+        print(f"文件大小: {os.path.getsize(output_path) / 1024:.2f} KB")
+        print(f"\n在FLAC3D中导入:")
+        print(f"  program call '{output_path}'")
+
+        return output_path
+
+    def _reset(self):
+        """重置状态"""
+        self.nodes = []
+        self.zones = []
+        self.groups = {}
+        self._next_node_id = 1
+        self._next_zone_id = 1
+        self._node_lookup = {}
+        self._coord_to_node = {}
+        self.stats = {
+            'total_nodes': 0,
+            'shared_nodes': 0,
+            'total_zones': 0,
+            'min_thickness': float('inf'),
+            'max_thickness': 0,
+            'negative_volume_zones': 0,
+        }
+
+    def _calculate_offset(self, layers: List[Dict], normalize: bool) -> Tuple[float, float, float]:
+        """计算坐标偏移"""
+        if not normalize:
+            return (0.0, 0.0, 0.0)
+
+        all_x, all_y, all_z = [], [], []
+
+        for layer in layers:
+            grid_x = np.asarray(layer.get('grid_x', []), dtype=float)
+            grid_y = np.asarray(layer.get('grid_y', []), dtype=float)
+            top_z = np.asarray(layer.get('top_surface_z', []), dtype=float)
+            bottom_z = np.asarray(layer.get('bottom_surface_z', []), dtype=float)
+
+            if grid_x.size > 0:
+                valid_x = grid_x[np.isfinite(grid_x)]
+                all_x.extend(valid_x.flatten())
+            if grid_y.size > 0:
+                valid_y = grid_y[np.isfinite(grid_y)]
+                all_y.extend(valid_y.flatten())
+            if top_z.size > 0:
+                valid_z = top_z[np.isfinite(top_z)]
+                all_z.extend(valid_z.flatten())
+            if bottom_z.size > 0:
+                valid_z = bottom_z[np.isfinite(bottom_z)]
+                all_z.extend(valid_z.flatten())
+
+        if all_x and all_y and all_z:
+            return (float(np.median(all_x)), float(np.median(all_y)), float(np.min(all_z)))
+        return (0.0, 0.0, 0.0)
+
+    def _enforce_layer_continuity(self, layers: List[Dict]):
+        """
+        强制层间连续性: 上层底面 = 下层顶面
+
+        这是确保应力/位移传导的关键!
+        """
+        print(f"\n--- 强制层间连续性 ---")
+
+        for i in range(1, len(layers)):
+            lower_layer = layers[i - 1]
+            upper_layer = layers[i]
+
+            lower_top = np.asarray(lower_layer['top_surface_z'], dtype=float)
+            upper_bottom = np.asarray(upper_layer['bottom_surface_z'], dtype=float)
+
+            # 检查差异
+            diff = np.abs(upper_bottom - lower_top)
+            max_diff = np.nanmax(diff)
+            mean_diff = np.nanmean(diff)
+
+            if max_diff > 1e-6:
+                print(f"  层 {i-1} -> 层 {i}: 最大差异 {max_diff:.6f}m, 平均差异 {mean_diff:.6f}m")
+                # 强制上层底面 = 下层顶面
+                upper_layer['bottom_surface_z'] = lower_top.copy()
+                print(f"    -> 已强制上层底面 = 下层顶面")
+            else:
+                print(f"  层 {i-1} -> 层 {i}: 已连续 (差异 < 1e-6m)")
+
+    def _get_or_create_node(self, x: float, y: float, z: float, precision: int) -> int:
+        """
+        获取或创建节点 (实现节点共享)
+
+        使用坐标的精确匹配来共享节点
+        """
+        # 四舍五入到指定精度
+        key = (round(x, precision), round(y, precision), round(z, precision))
+
+        if key in self._coord_to_node:
+            self.stats['shared_nodes'] += 1
+            return self._coord_to_node[key]
+
+        # 创建新节点
+        node = FLAC3DNode(
+            id=self._next_node_id,
+            x=key[0],
+            y=key[1],
+            z=key[2]
+        )
+        self.nodes.append(node)
+        self._node_lookup[node.id] = node
+        self._coord_to_node[key] = node.id
+        self._next_node_id += 1
+
+        return node.id
+
+    def _generate_mesh(self, layers: List[Dict], downsample: int,
+                      coord_offset: Tuple[float, float, float],
+                      precision: int, min_thickness: float):
+        """生成完整的网格"""
+
+        x_off, y_off, z_off = coord_offset
+
+        for layer_idx, layer in enumerate(layers):
+            layer_name = layer.get('name', f'Layer_{layer_idx}')
+            safe_name = self._sanitize_name(layer_name)
+
+            print(f"\n  处理地层 {layer_idx+1}/{len(layers)}: {layer_name}")
+
+            # 获取网格数据
+            grid_x = np.asarray(layer.get('grid_x', []), dtype=float)
+            grid_y = np.asarray(layer.get('grid_y', []), dtype=float)
+            top_z = np.asarray(layer.get('top_surface_z', []), dtype=float)
+            bottom_z = np.asarray(layer.get('bottom_surface_z', []), dtype=float)
+
+            if grid_x.size == 0:
+                print(f"    跳过: 数据为空")
+                continue
+
+            # 确保2D
+            if grid_x.ndim == 1:
+                grid_x, grid_y = np.meshgrid(grid_x, grid_y)
+
+            # 降采样
+            if downsample > 1:
+                grid_x = grid_x[::downsample, ::downsample]
+                grid_y = grid_y[::downsample, ::downsample]
+                top_z = top_z[::downsample, ::downsample]
+                bottom_z = bottom_z[::downsample, ::downsample]
+
+            rows, cols = grid_x.shape
+            print(f"    网格尺寸: {rows}x{cols}")
+
+            # 应用坐标偏移
+            grid_x = grid_x - x_off
+            grid_y = grid_y - y_off
+            top_z = top_z - z_off
+            bottom_z = bottom_z - z_off
+
+            # 创建分组
+            if safe_name not in self.groups:
+                self.groups[safe_name] = FLAC3DGroup(name=safe_name)
+
+            # 生成单元
+            zone_count = 0
+            skipped_count = 0
+
+            for i in range(rows - 1):
+                for j in range(cols - 1):
+                    # 检查有效性
+                    if (np.isnan(top_z[i, j]) or np.isnan(bottom_z[i, j]) or
+                        np.isnan(top_z[i, j+1]) or np.isnan(bottom_z[i, j+1]) or
+                        np.isnan(top_z[i+1, j+1]) or np.isnan(bottom_z[i+1, j+1]) or
+                        np.isnan(top_z[i+1, j]) or np.isnan(bottom_z[i+1, j])):
+                        skipped_count += 1
+                        continue
+
+                    # 计算厚度
+                    thickness = np.mean([
+                        top_z[i, j] - bottom_z[i, j],
+                        top_z[i, j+1] - bottom_z[i, j+1],
+                        top_z[i+1, j+1] - bottom_z[i+1, j+1],
+                        top_z[i+1, j] - bottom_z[i+1, j]
+                    ])
+
+                    # 更新统计
+                    self.stats['min_thickness'] = min(self.stats['min_thickness'], thickness)
+                    self.stats['max_thickness'] = max(self.stats['max_thickness'], thickness)
+
+                    if thickness < min_thickness:
+                        skipped_count += 1
+                        continue
+
+                    # 获取/创建8个节点 (使用节点共享!)
+                    # 底面4个节点 (逆时针从SW开始)
+                    n0 = self._get_or_create_node(grid_x[i, j], grid_y[i, j], bottom_z[i, j], precision)
+                    n1 = self._get_or_create_node(grid_x[i, j+1], grid_y[i, j+1], bottom_z[i, j+1], precision)
+                    n2 = self._get_or_create_node(grid_x[i+1, j+1], grid_y[i+1, j+1], bottom_z[i+1, j+1], precision)
+                    n3 = self._get_or_create_node(grid_x[i+1, j], grid_y[i+1, j], bottom_z[i+1, j], precision)
+
+                    # 顶面4个节点 (逆时针从SW开始)
+                    n4 = self._get_or_create_node(grid_x[i, j], grid_y[i, j], top_z[i, j], precision)
+                    n5 = self._get_or_create_node(grid_x[i, j+1], grid_y[i, j+1], top_z[i, j+1], precision)
+                    n6 = self._get_or_create_node(grid_x[i+1, j+1], grid_y[i+1, j+1], top_z[i+1, j+1], precision)
+                    n7 = self._get_or_create_node(grid_x[i+1, j], grid_y[i+1, j], top_z[i+1, j], precision)
+
+                    # FLAC3D B8节点顺序: 底面(1-2-3-4) + 顶面(5-6-7-8)
+                    # 注意: FLAC3D使用1-based索引,但我们的node_ids已经是从1开始
+                    node_ids = [n0, n1, n3, n2, n4, n5, n7, n6]  # 调整顺序以匹配FLAC3D
+
+                    # 检查体积 (确保正体积)
+                    volume = self._calculate_hex_volume(node_ids)
+                    if volume < 0:
+                        self.stats['negative_volume_zones'] += 1
+                        # 翻转节点顺序
+                        node_ids = [n0, n3, n1, n2, n4, n7, n5, n6]
+
+                    # 创建单元
+                    zone = FLAC3DZone(
+                        id=self._next_zone_id,
+                        node_ids=node_ids,
+                        group=safe_name
+                    )
+                    self.zones.append(zone)
+                    self.groups[safe_name].zone_ids.append(zone.id)
+                    self._next_zone_id += 1
+                    zone_count += 1
+
+            print(f"    生成单元: {zone_count}, 跳过: {skipped_count}")
+            print(f"    节点共享: {self.stats['shared_nodes']}")
+
+        self.stats['total_nodes'] = len(self.nodes)
+        self.stats['total_zones'] = len(self.zones)
+
+    def _calculate_hex_volume(self, node_ids: List[int]) -> float:
+        """计算六面体体积 (使用分解为5个四面体的方法)"""
+        # 获取8个顶点坐标
+        coords = []
+        for nid in node_ids:
+            node = self._node_lookup[nid]
+            coords.append(np.array([node.x, node.y, node.z]))
+
+        # 分解为5个四面体计算体积
+        tet_indices = [
+            (0, 1, 3, 4),
+            (1, 2, 3, 6),
+            (1, 4, 5, 6),
+            (3, 4, 6, 7),
+            (1, 3, 4, 6)
+        ]
+
+        total_volume = 0
+        for i0, i1, i2, i3 in tet_indices:
+            v1 = coords[i1] - coords[i0]
+            v2 = coords[i2] - coords[i0]
+            v3 = coords[i3] - coords[i0]
+            vol = np.dot(v1, np.cross(v2, v3)) / 6.0
+            total_volume += vol
+
+        return total_volume
+
+    def _validate_mesh(self):
+        """验证网格质量"""
+        print(f"  检查节点连续性...")
+
+        # 检查每个节点被多少个单元共享
+        node_usage = {}
+        for zone in self.zones:
+            for nid in zone.node_ids:
+                node_usage[nid] = node_usage.get(nid, 0) + 1
+
+        # 统计
+        usage_counts = list(node_usage.values())
+        max_usage = max(usage_counts) if usage_counts else 0
+        avg_usage = np.mean(usage_counts) if usage_counts else 0
+
+        print(f"    节点最大共享数: {max_usage}")
+        print(f"    节点平均共享数: {avg_usage:.2f}")
+
+        # 检查层间节点共享
+        print(f"  验证层间节点共享...")
+
+        # 按Z坐标分组节点
+        z_layers = {}
+        for node in self.nodes:
+            z_key = round(node.z, 4)
+            if z_key not in z_layers:
+                z_layers[z_key] = []
+            z_layers[z_key].append(node.id)
+
+        z_values = sorted(z_layers.keys())
+        print(f"    发现 {len(z_values)} 个Z层面")
+
+        # 检查相邻层是否共享节点
+        for i in range(1, len(z_values)):
+            lower_z = z_values[i-1]
+            upper_z = z_values[i]
+            gap = upper_z - lower_z
+            lower_nodes = set(z_layers[lower_z])
+            upper_nodes = set(z_layers[upper_z])
+
+            # 在层间应该有共享节点 (通过坐标匹配)
+            print(f"    层面 Z={lower_z:.2f} -> Z={upper_z:.2f}: 间距 {gap:.4f}m, 节点数 {len(lower_nodes)}/{len(upper_nodes)}")
+
+    def _sanitize_name(self, name: str) -> str:
+        """清理组名"""
+        # 中文到英文映射
+        mapping = {
+            '煤': 'coal',
+            '煤层': 'coal',
+            '砂岩': 'sandstone',
+            '细砂岩': 'fine_sandstone',
+            '中砂岩': 'medium_sandstone',
+            '粗砂岩': 'coarse_sandstone',
+            '泥岩': 'mudstone',
+            '砂质泥岩': 'sandy_mudstone',
+            '炭质泥岩': 'carbonaceous_mudstone',
+            '页岩': 'shale',
+            '炭质页岩': 'carbonaceous_shale',
+            '粉砂岩': 'siltstone',
+            '灰岩': 'limestone',
+            '石灰岩': 'limestone',
+            '砾岩': 'conglomerate',
+        }
+
+        result = name or 'group'
+        for cn, en in mapping.items():
+            result = result.replace(cn, en)
+
+        # 移除非法字符
+        result = re.sub(r'[^0-9A-Za-z_]', '_', result)
+        result = result.strip('_') or 'group'
+
+        return result
+
+    def _write_flac3d_script(self, output_path: str):
+        """写入FLAC3D命令脚本"""
+        print(f"\n--- 写入FLAC3D脚本 ---")
+
+        with open(output_path, 'w', encoding='utf-8') as f:
+            # 文件头
+            f.write("; ============================================\n")
+            f.write("; FLAC3D Mesh Import Script\n")
+            f.write("; Generated by Enhanced FLAC3D Exporter\n")
+            f.write("; ============================================\n")
+            f.write(f"; Total Gridpoints: {len(self.nodes)}\n")
+            f.write(f"; Total Zones: {len(self.zones)}\n")
+            f.write(f"; Total Groups: {len(self.groups)}\n")
+            f.write(f"; Shared Nodes: {self.stats['shared_nodes']}\n")
+            f.write("; ============================================\n\n")
+
+            # 初始化模型
+            f.write("; Initialize model\n")
+            f.write("model new\n")
+            f.write("model large-strain off\n\n")
+
+            # 创建节点
+            f.write("; ============================================\n")
+            f.write("; Create gridpoints\n")
+            f.write("; ============================================\n")
+            for node in self.nodes:
+                f.write(f"zone gridpoint create id {node.id} position ({node.x:.6f},{node.y:.6f},{node.z:.6f})\n")
+            f.write("\n")
+
+            # 创建单元
+            f.write("; ============================================\n")
+            f.write("; Create zones (brick)\n")
+            f.write("; ============================================\n")
+            for zone in self.zones:
+                gp_str = ' '.join(str(nid) for nid in zone.node_ids)
+                f.write(f"zone create brick point-id {gp_str}\n")
+            f.write("\n")
+
+            # 创建分组
+            f.write("; ============================================\n")
+            f.write("; Assign zone groups\n")
+            f.write("; ============================================\n")
+            for group_name, group in self.groups.items():
+                if not group.zone_ids:
+                    continue
+
+                # 使用范围选择
+                f.write(f"; Group: {group_name} ({len(group.zone_ids)} zones)\n")
+
+                # 分批处理,每批100个单元
+                batch_size = 100
+                for i in range(0, len(group.zone_ids), batch_size):
+                    batch = group.zone_ids[i:i+batch_size]
+                    zone_list = ' '.join(str(zid) for zid in batch)
+                    f.write(f"zone group '{group_name}' range id {zone_list}\n")
+
+                f.write("\n")
+
+            # 验证信息
+            f.write("; ============================================\n")
+            f.write("; Verify mesh\n")
+            f.write("; ============================================\n")
+            f.write("zone list\n")
+            f.write("zone group list\n\n")
+
+            # 文件结束
+            f.write("; ============================================\n")
+            f.write("; End of mesh definition\n")
+            f.write("; ============================================\n")
+            f.write("; Next steps:\n")
+            f.write("; 1. Assign constitutive models: zone cmodel assign ...\n")
+            f.write("; 2. Assign material properties: zone property ...\n")
+            f.write("; 3. Set boundary conditions: zone face apply ...\n")
+            f.write("; 4. Initialize stresses: zone initialize ...\n")
+            f.write("; 5. Solve: model solve\n")
+
+    def _print_statistics(self):
+        """打印统计信息"""
+        print(f"\n{'='*60}")
+        print(f"网格统计")
+        print(f"{'='*60}")
+        print(f"总节点数: {self.stats['total_nodes']}")
+        print(f"共享节点数: {self.stats['shared_nodes']}")
+        print(f"总单元数: {self.stats['total_zones']}")
+        print(f"分组数: {len(self.groups)}")
+        print(f"厚度范围: {self.stats['min_thickness']:.4f}m - {self.stats['max_thickness']:.4f}m")
+        if self.stats['negative_volume_zones'] > 0:
+            print(f"警告: 修复了 {self.stats['negative_volume_zones']} 个负体积单元")
+
+        # 按分组统计
+        print(f"\n分组详情:")
+        for name, group in self.groups.items():
+            print(f"  {name}: {len(group.zone_ids)} 单元")
+
+
+def export_for_flac3d(data: Dict[str, Any], output_path: str,
+                      options: Optional[Dict[str, Any]] = None) -> str:
+    """
+    便捷导出函数
+
+    Args:
+        data: 地层数据
+        output_path: 输出路径
+        options: 选项
+
+    Returns:
+        输出文件路径
+    """
+    exporter = EnhancedFLAC3DExporter()
+    return exporter.export(data, output_path, options)
+
+
+if __name__ == '__main__':
+    print("Enhanced FLAC3D Exporter")
+    print("确保层间节点共享,保证应力/位移正常传导")

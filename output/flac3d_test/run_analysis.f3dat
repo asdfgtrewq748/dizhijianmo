@@ -1,0 +1,39 @@
+; FLAC3D 完整分析脚本
+; 自动生成 - GNN地质建模系统
+
+; 1. 导入模型
+program call 'geological_model.f3dat'
+
+; 2. 设置本构模型
+zone cmodel assign mohr-coulomb
+
+; 3. 设置材料属性
+; 泥岩
+zone property density=2400 shear=2.00e+09 bulk=3.33e+09 range group '泥岩'
+zone property cohesion=2.00e+06 friction=30 range group '泥岩'
+
+; 煤层
+zone property density=1400 shear=7.69e+08 bulk=1.67e+09 range group '煤层'
+zone property cohesion=1.00e+06 friction=25 range group '煤层'
+
+; 砂岩
+zone property density=2600 shear=6.25e+09 bulk=8.33e+09 range group '砂岩'
+zone property cohesion=5.00e+06 friction=35 range group '砂岩'
+
+; 4. 边界条件
+zone face apply velocity-x 0 range position-x 0
+zone face apply velocity-x 0 range position-x 100
+zone face apply velocity-y 0 range position-y 0
+zone face apply velocity-y 0 range position-y 100
+zone face apply velocity-z 0 range position-z 0
+
+; 5. 重力初始化
+model gravity 0 0 -9.81
+zone initialize-stresses ratio 0.5
+
+; 6. 求解到平衡
+model solve ratio-average 1e-5
+model save "initial_equilibrium.f3sav"
+
+; 完成
+program log-file off

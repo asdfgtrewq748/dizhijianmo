@@ -1030,6 +1030,47 @@ def main():
 
                 # 可视化设置
                 st.subheader("显示设置")
+
+                # 性能预设（新增）
+                with st.expander("🎯 性能预设（推荐）", expanded=True):
+                    performance_preset = st.radio(
+                        "选择预设配置",
+                        ["🚀 流畅模式（推荐）", "⚖️ 平衡模式", "🎨 高质量模式", "🔧 自定义"],
+                        index=0,
+                        horizontal=True,
+                        help="根据设备性能选择预设，流畅模式适合大多数设备"
+                    )
+
+                    # 根据预设自动配置参数
+                    if performance_preset == "🚀 流畅模式（推荐）":
+                        preset_quality = '流畅模式（推荐）'
+                        preset_skip_bottom = True
+                        preset_simplify_sides = True
+                        preset_show_sides = True
+                        preset_render_mode = '基础渲染'
+                        st.success("✅ 已选择流畅模式：4倍降采样 + 简化侧面 + 隐藏底面")
+                    elif performance_preset == "⚖️ 平衡模式":
+                        preset_quality = '平衡模式'
+                        preset_skip_bottom = True
+                        preset_simplify_sides = False
+                        preset_show_sides = True
+                        preset_render_mode = '增强材质'
+                        st.info("已选择平衡模式：2倍降采样 + 完整侧面 + 隐藏底面")
+                    elif performance_preset == "🎨 高质量模式":
+                        preset_quality = '高质量'
+                        preset_skip_bottom = False
+                        preset_simplify_sides = False
+                        preset_show_sides = True
+                        preset_render_mode = '增强材质'
+                        st.warning("已选择高质量模式：可能会卡顿，建议性能较好的设备使用")
+                    else:  # 自定义
+                        preset_quality = None
+                        preset_skip_bottom = None
+                        preset_simplify_sides = None
+                        preset_show_sides = None
+                        preset_render_mode = None
+                        st.info("自定义模式：手动配置所有参数")
+
                 col_opt1, col_opt2, col_opt3 = st.columns(3)
 
                 with col_opt1:
@@ -1040,37 +1081,70 @@ def main():
                     )
 
                 with col_opt2:
-                    render_mode = st.selectbox(
-                        "渲染模式",
-                        ['增强材质', '基础渲染', '线框模式'],
-                        index=0,
-                        help="增强材质：带纹理和光照效果"
-                    )
+                    if preset_render_mode is None:
+                        render_mode = st.selectbox(
+                            "渲染模式",
+                            ['增强材质', '基础渲染', '线框模式'],
+                            index=0,
+                            help="增强材质：带纹理和光照效果"
+                        )
+                    else:
+                        render_mode = preset_render_mode
+                        st.text(f"渲染模式: {render_mode}")
 
                 with col_opt3:
-                    show_sides = st.checkbox("显示侧面", value=True, help="显示地层侧面轮廓")
+                    if preset_show_sides is None:
+                        show_sides = st.checkbox("显示侧面", value=True, help="显示地层侧面轮廓")
+                    else:
+                        show_sides = preset_show_sides
+                        st.checkbox("显示侧面", value=show_sides, disabled=True)
                     surface_opacity = st.slider("透明度", 0.3, 1.0, 0.9)
-
-                # 高级性能选项（默认最高质量，可调整以适应不同硬件）
-                with st.expander("⚙️ 高级性能选项", expanded=False):
-                    col_perf1, col_perf2 = st.columns(2)
-                    with col_perf1:
-                        preview_quality = st.selectbox(
-                            "预览质量",
-                            ['高质量', '平衡', '高性能'],
+                    if show_sides:
+                        side_style = st.selectbox(
+                            "侧面样式",
+                            ["线框", "封闭面"],
                             index=0,
-                            help="高质量：完整分辨率，最佳效果；高性能：降采样显示"
+                            help="封闭面更像块体，但渲染更耗性能"
                         )
-                    with col_perf2:
-                        skip_bottom = st.checkbox("隐藏底面", value=False, help="隐藏底面可减少渲染量")
+                        if side_style == "封闭面":
+                            side_opacity = st.slider("侧面透明度", 0.1, 1.0, 0.5)
+                        else:
+                            side_opacity = 0.5
+                    else:
+                        side_style = "线框"
+                        side_opacity = 0.5
 
-                # 根据预览质量调整分辨率（默认高质量，无降采样）
-                if preview_quality == '高质量':
+                # 高级性能选项（仅在自定义模式显示）
+                if performance_preset == "🔧 自定义":
+                    with st.expander("⚙️ 高级性能选项", expanded=False):
+                        col_perf1, col_perf2, col_perf3 = st.columns(3)
+                        with col_perf1:
+                            preview_quality = st.selectbox(
+                                "预览质量",
+                                ['流畅模式（推荐）', '平衡模式', '高质量'],
+                                index=0,
+                                help="流畅：4倍降采样，交互流畅；平衡：2倍降采样；高质量：完整分辨率"
+                            )
+                        with col_perf2:
+                            skip_bottom = st.checkbox("隐藏底面", value=True, help="隐藏底面可显著减少渲染量")
+                        with col_perf3:
+                            simplify_sides = st.checkbox("简化侧面", value=True, help="仅显示边界框，不显示每个网格边缘")
+
+                        # 添加性能提示
+                        st.info("💡 如果预览卡顿，建议选择'流畅模式'并启用'简化侧面'")
+                else:
+                    # 使用预设值
+                    preview_quality = preset_quality
+                    skip_bottom = preset_skip_bottom
+                    simplify_sides = preset_simplify_sides
+
+                # 根据预览质量调整分辨率（优化默认值）
+                if preview_quality == '流畅模式（推荐）':
+                    downsample = 4  # 4倍降采样，最流畅
+                elif preview_quality == '平衡模式':
+                    downsample = 2  # 2倍降采样
+                else:  # 高质量
                     downsample = 1  # 完整分辨率
-                elif preview_quality == '平衡':
-                    downsample = 2
-                else:  # 高性能
-                    downsample = 4
 
                 # 降采样网格
                 if downsample > 1:
@@ -1163,60 +1237,166 @@ def main():
                             name=f"{bm.name}"
                         ))
 
-                    # 添加侧面（优化：合并为单个trace）
+                    # 添加侧面（性能优化版本）
                     if show_sides and render_mode != '线框模式':
                         shadow_color = colors.get('shadow', base_color)
-                        n = XI_display.shape[0]
 
-                        # 合并所有侧面线条为一个trace（使用None分隔）
-                        x_all, y_all, z_all = [], [], []
+                        if side_style == "封闭面":
+                            def _sample_1d(values, step: int):
+                                values = np.asarray(values)
+                                if step <= 1 or values.size == 0:
+                                    return values
+                                sampled = values[::step]
+                                if (values.size - 1) % step != 0:
+                                    sampled = np.concatenate([sampled, values[-1:]])
+                                return sampled
 
-                        # 前侧面 (y=0) - 简化为边界线
-                        x_all.extend(XI_display[0, :].tolist() + [None])
-                        y_all.extend(YI_display[0, :].tolist() + [None])
-                        z_all.extend(top_display[0, :].tolist() + [None])
-                        x_all.extend(XI_display[0, :].tolist() + [None])
-                        y_all.extend(YI_display[0, :].tolist() + [None])
-                        z_all.extend(bottom_display[0, :].tolist() + [None])
+                            if simplify_sides:
+                                step_x = max(1, XI_display.shape[1] // 40)
+                                step_y = max(1, XI_display.shape[0] // 40)
+                            else:
+                                step_x = 1
+                                step_y = 1
 
-                        # 后侧面 (y=max)
-                        x_all.extend(XI_display[-1, :].tolist() + [None])
-                        y_all.extend(YI_display[-1, :].tolist() + [None])
-                        z_all.extend(top_display[-1, :].tolist() + [None])
-                        x_all.extend(XI_display[-1, :].tolist() + [None])
-                        y_all.extend(YI_display[-1, :].tolist() + [None])
-                        z_all.extend(bottom_display[-1, :].tolist() + [None])
+                            side_colorscale = [[0, shadow_color], [1, shadow_color]]
 
-                        # 左侧面 (x=0)
-                        x_all.extend(XI_display[:, 0].tolist() + [None])
-                        y_all.extend(YI_display[:, 0].tolist() + [None])
-                        z_all.extend(top_display[:, 0].tolist() + [None])
-                        x_all.extend(XI_display[:, 0].tolist() + [None])
-                        y_all.extend(YI_display[:, 0].tolist() + [None])
-                        z_all.extend(bottom_display[:, 0].tolist() + [None])
+                            def _add_side_face(x_line, y_line, z_bottom, z_top, step: int):
+                                x_line = _sample_1d(x_line, step)
+                                y_line = _sample_1d(y_line, step)
+                                z_bottom = _sample_1d(z_bottom, step)
+                                z_top = _sample_1d(z_top, step)
+                                fig.add_trace(go.Surface(
+                                    x=np.vstack([x_line, x_line]),
+                                    y=np.vstack([y_line, y_line]),
+                                    z=np.vstack([z_bottom, z_top]),
+                                    colorscale=side_colorscale,
+                                    showscale=False,
+                                    opacity=side_opacity,
+                                    name=f"{bm.name} (侧面)",
+                                    showlegend=False,
+                                    hoverinfo='skip'
+                                ))
 
-                        # 右侧面 (x=max)
-                        x_all.extend(XI_display[:, -1].tolist() + [None])
-                        y_all.extend(YI_display[:, -1].tolist() + [None])
-                        z_all.extend(top_display[:, -1].tolist() + [None])
-                        x_all.extend(XI_display[:, -1].tolist() + [None])
-                        y_all.extend(YI_display[:, -1].tolist() + [None])
-                        z_all.extend(bottom_display[:, -1].tolist() + [None])
+                            _add_side_face(
+                                XI_display[0, :],
+                                YI_display[0, :],
+                                bottom_display[0, :],
+                                top_display[0, :],
+                                step=step_x
+                            )
+                            _add_side_face(
+                                XI_display[-1, :],
+                                YI_display[-1, :],
+                                bottom_display[-1, :],
+                                top_display[-1, :],
+                                step=step_x
+                            )
+                            _add_side_face(
+                                XI_display[:, 0],
+                                YI_display[:, 0],
+                                bottom_display[:, 0],
+                                top_display[:, 0],
+                                step=step_y
+                            )
+                            _add_side_face(
+                                XI_display[:, -1],
+                                YI_display[:, -1],
+                                bottom_display[:, -1],
+                                top_display[:, -1],
+                                step=step_y
+                            )
 
-                        # 添加垂直连接线（只在角落）
-                        corners = [(0, 0), (0, -1), (-1, 0), (-1, -1)]
-                        for j, i in corners:
-                            x_all.extend([XI_display[j, i], XI_display[j, i], None])
-                            y_all.extend([YI_display[j, i], YI_display[j, i], None])
-                            z_all.extend([bottom_display[j, i], top_display[j, i], None])
+                        elif simplify_sides:
+                            # 简化模式：只显示边界框（性能最优）
+                            x_all, y_all, z_all = [], [], []
 
-                        fig.add_trace(go.Scatter3d(
-                            x=x_all, y=y_all, z=z_all,
-                            mode='lines',
-                            line=dict(color=shadow_color, width=1),
-                            showlegend=False,
-                            hoverinfo='skip'
-                        ))
+                            # 8个角点
+                            corners_idx = [
+                                (0, 0), (0, -1), (-1, -1), (-1, 0), (0, 0),  # 底面闭合
+                            ]
+                            # 底边框
+                            for j, i in corners_idx:
+                                x_all.append(XI_display[j, i])
+                                y_all.append(YI_display[j, i])
+                                z_all.append(bottom_display[j, i])
+                            x_all.append(None)
+                            y_all.append(None)
+                            z_all.append(None)
+
+                            # 顶边框
+                            for j, i in corners_idx:
+                                x_all.append(XI_display[j, i])
+                                y_all.append(YI_display[j, i])
+                                z_all.append(top_display[j, i])
+                            x_all.append(None)
+                            y_all.append(None)
+                            z_all.append(None)
+
+                            # 4条垂直边
+                            for j, i in [(0, 0), (0, -1), (-1, -1), (-1, 0)]:
+                                x_all.extend([XI_display[j, i], XI_display[j, i], None])
+                                y_all.extend([YI_display[j, i], YI_display[j, i], None])
+                                z_all.extend([bottom_display[j, i], top_display[j, i], None])
+
+                            fig.add_trace(go.Scatter3d(
+                                x=x_all, y=y_all, z=z_all,
+                                mode='lines',
+                                line=dict(color=shadow_color, width=2),
+                                showlegend=False,
+                                hoverinfo='skip'
+                            ))
+                        else:
+                            # 详细模式：显示完整边界（较慢）
+                            x_all, y_all, z_all = [], [], []
+
+                            # 前侧面 (y=0) - 每隔N个点采样
+                            step = max(1, XI_display.shape[1] // 10)
+                            x_all.extend(XI_display[0, ::step].tolist() + [XI_display[0, -1]] + [None])
+                            y_all.extend(YI_display[0, ::step].tolist() + [YI_display[0, -1]] + [None])
+                            z_all.extend(top_display[0, ::step].tolist() + [top_display[0, -1]] + [None])
+                            x_all.extend(XI_display[0, ::step].tolist() + [XI_display[0, -1]] + [None])
+                            y_all.extend(YI_display[0, ::step].tolist() + [YI_display[0, -1]] + [None])
+                            z_all.extend(bottom_display[0, ::step].tolist() + [bottom_display[0, -1]] + [None])
+
+                            # 后侧面 (y=max)
+                            x_all.extend(XI_display[-1, ::step].tolist() + [XI_display[-1, -1]] + [None])
+                            y_all.extend(YI_display[-1, ::step].tolist() + [YI_display[-1, -1]] + [None])
+                            z_all.extend(top_display[-1, ::step].tolist() + [top_display[-1, -1]] + [None])
+                            x_all.extend(XI_display[-1, ::step].tolist() + [XI_display[-1, -1]] + [None])
+                            y_all.extend(YI_display[-1, ::step].tolist() + [YI_display[-1, -1]] + [None])
+                            z_all.extend(bottom_display[-1, ::step].tolist() + [bottom_display[-1, -1]] + [None])
+
+                            # 左侧面 (x=0)
+                            step_y = max(1, XI_display.shape[0] // 10)
+                            x_all.extend(XI_display[::step_y, 0].tolist() + [XI_display[-1, 0]] + [None])
+                            y_all.extend(YI_display[::step_y, 0].tolist() + [YI_display[-1, 0]] + [None])
+                            z_all.extend(top_display[::step_y, 0].tolist() + [top_display[-1, 0]] + [None])
+                            x_all.extend(XI_display[::step_y, 0].tolist() + [XI_display[-1, 0]] + [None])
+                            y_all.extend(YI_display[::step_y, 0].tolist() + [YI_display[-1, 0]] + [None])
+                            z_all.extend(bottom_display[::step_y, 0].tolist() + [bottom_display[-1, 0]] + [None])
+
+                            # 右侧面 (x=max)
+                            x_all.extend(XI_display[::step_y, -1].tolist() + [XI_display[-1, -1]] + [None])
+                            y_all.extend(YI_display[::step_y, -1].tolist() + [YI_display[-1, -1]] + [None])
+                            z_all.extend(top_display[::step_y, -1].tolist() + [top_display[-1, -1]] + [None])
+                            x_all.extend(XI_display[::step_y, -1].tolist() + [XI_display[-1, -1]] + [None])
+                            y_all.extend(YI_display[::step_y, -1].tolist() + [YI_display[-1, -1]] + [None])
+                            z_all.extend(bottom_display[::step_y, -1].tolist() + [bottom_display[-1, -1]] + [None])
+
+                            # 垂直连接线
+                            corners = [(0, 0), (0, -1), (-1, 0), (-1, -1)]
+                            for j, i in corners:
+                                x_all.extend([XI_display[j, i], XI_display[j, i], None])
+                                y_all.extend([YI_display[j, i], YI_display[j, i], None])
+                                z_all.extend([bottom_display[j, i], top_display[j, i], None])
+
+                            fig.add_trace(go.Scatter3d(
+                                x=x_all, y=y_all, z=z_all,
+                                mode='lines',
+                                line=dict(color=shadow_color, width=1),
+                                showlegend=False,
+                                hoverinfo='skip'
+                            ))
 
                 # 添加图例
                 for layer_name in show_layers:
@@ -1271,15 +1451,22 @@ def main():
                     )
                 )
 
-                # 使用WebGL配置提升性能
+                # 使用WebGL配置提升性能并充分利用GPU
                 config = {
                     'displayModeBar': True,
                     'scrollZoom': True,
                     'responsive': True,
                     'displaylogo': False,
                     'modeBarButtonsToRemove': ['lasso2d', 'select2d'],
+                    # 强制使用硬件加速
+                    'plotGlPixelRatio': 2,  # 提升渲染质量
                 }
-                st.plotly_chart(fig, width="stretch", config=config)
+
+                # 添加性能统计显示
+                actual_points = XI_display.shape[0] * XI_display.shape[1] * len(show_layers)
+                st.caption(f"📊 当前渲染点数: {actual_points:,} | 分辨率: {XI_display.shape[1]}×{XI_display.shape[0]}")
+
+                st.plotly_chart(fig, use_container_width=True, config=config)
 
                 # 显示颜色图例说明
                 st.markdown("---")
@@ -1321,6 +1508,24 @@ def main():
                         )
                         pv_opacity = st.slider("PyVista 透明度", 0.5, 1.0, 0.95)
 
+                    # GPU加速选项
+                    with st.expander("⚡ GPU加速设置（高级）"):
+                        col_gpu1, col_gpu2 = st.columns(2)
+                        with col_gpu1:
+                            pv_multi_samples = st.select_slider(
+                                "抗锯齿级别 (MSAA)",
+                                options=[0, 2, 4, 8],
+                                value=4,
+                                help="多重采样抗锯齿，提升边缘质量。8=最高质量但需要强GPU"
+                            )
+                        with col_gpu2:
+                            pv_enable_ssao = st.checkbox(
+                                "启用 SSAO",
+                                value=False,
+                                help="屏幕空间环境光遮蔽，增强深度感。需要较强GPU"
+                            )
+                        st.info("💡 如果导出很慢或失败，尝试降低MSAA级别或关闭SSAO")
+
                     if st.button("🎨 PyVista 渲染导出", type="primary"):
                         with st.spinner("正在使用 PyVista 渲染..."):
                             try:
@@ -1328,11 +1533,13 @@ def main():
                                 output_dir = os.path.join(project_root, 'output', 'pyvista')
                                 os.makedirs(output_dir, exist_ok=True)
 
-                                # 创建渲染器
+                                # 创建渲染器（启用GPU加速）
                                 renderer = GeologicalModelRenderer(
                                     background='white',
                                     window_size=(1920, 1080),
-                                    use_pbr=pv_use_pbr
+                                    use_pbr=pv_use_pbr,
+                                    multi_samples=pv_multi_samples,  # GPU抗锯齿
+                                    enable_ssao=pv_enable_ssao  # SSAO效果
                                 )
 
                                 # 渲染模型

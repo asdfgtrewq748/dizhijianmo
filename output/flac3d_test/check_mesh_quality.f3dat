@@ -1,0 +1,9 @@
+; FLAC3D 网格质量检查脚本
+
+program call 'geological_model.f3dat'
+
+; 检查单元质量
+zone list quality
+
+; 检查节点共享情况
+zone list information
