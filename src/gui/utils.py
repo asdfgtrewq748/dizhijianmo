@@ -21,6 +21,13 @@ class QtLogHandler(logging.Handler, QObject):
 
 def setup_logging(log_file="app.log"):
     """Sets up the logging configuration."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            if hasattr(stream, "reconfigure"):
+                stream.reconfigure(errors="backslashreplace")
+        except Exception:
+            pass
+
     # Create a root logger
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
