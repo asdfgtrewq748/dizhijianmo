@@ -33,7 +33,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QComboBox, QSpinBox, QDoubleSpinBox,
     QGroupBox, QTextEdit, QProgressBar, QTabWidget, QCheckBox,
-    QSplitter, QSlider, QListWidget, QMessageBox, QFileDialog,
+    QSplitter, QSlider, QListWidget, QListWidgetItem, QMessageBox, QFileDialog,
     QScrollArea, QFrame, QDialog, QTableWidget, QTableWidgetItem, QHeaderView,
     QMenuBar, QMenu
 )
@@ -76,6 +76,7 @@ if PYVISTA_AVAILABLE:
 # FLAC3D导出器
 try:
     from src.exporters.flac3d_enhanced_exporter import EnhancedFLAC3DExporter
+    from src.exporters.flac3d_compact_exporter import CompactFLAC3DExporter
     FLAC3D_EXPORTER_AVAILABLE = True
 except ImportError:
     FLAC3D_EXPORTER_AVAILABLE = False
@@ -550,23 +551,64 @@ class GeologicalModelingApp(QMainWindow):
         render_layout.setSpacing(10)
 
         render_layout.addWidget(QLabel("显示地层:"))
-        
-        # 地层列表控制按钮
-        layer_btn_layout = QHBoxLayout()
-        self.select_all_btn = QPushButton("全选")
-        self.select_all_btn.clicked.connect(self.select_all_layers)
-        self.select_none_btn = QPushButton("全不选")
-        self.select_none_btn.clicked.connect(self.deselect_all_layers)
-        layer_btn_layout.addWidget(self.select_all_btn)
-        layer_btn_layout.addWidget(self.select_none_btn)
-        render_layout.addLayout(layer_btn_layout)
 
+        # 地层选择工具栏 - 改进
+        layer_toolbar = QHBoxLayout()
+        self.select_all_btn = QPushButton("全选")
+        self.select_all_btn.setMaximumWidth(50)
+        self.select_all_btn.clicked.connect(self.select_all_layers)
+
+        self.select_none_btn = QPushButton("全不选")
+        self.select_none_btn.setMaximumWidth(60)
+        self.select_none_btn.clicked.connect(self.deselect_all_layers)
+
+        self.invert_selection_btn = QPushButton("反选")
+        self.invert_selection_btn.setMaximumWidth(50)
+        self.invert_selection_btn.clicked.connect(self.invert_layer_selection)
+
+        layer_toolbar.addWidget(self.select_all_btn)
+        layer_toolbar.addWidget(self.select_none_btn)
+        layer_toolbar.addWidget(self.invert_selection_btn)
+        layer_toolbar.addStretch()
+        render_layout.addLayout(layer_toolbar)
+
+        # 搜索框
+        self.layer_search = QLineEdit()
+        self.layer_search.setPlaceholderText("🔍 搜索地层...")
+        self.layer_search.textChanged.connect(self.filter_layers)
+        self.layer_search.setMaximumHeight(28)
+        render_layout.addWidget(self.layer_search)
+
+        # 地层列表 - 改进样式
         self.layer_list = QListWidget()
-        self.layer_list.setMaximumHeight(150)
+        self.layer_list.setMaximumHeight(200)
+        self.layer_list.setMinimumHeight(150)
         # 使用 NoSelection 模式，完全依赖 CheckBox
         self.layer_list.setSelectionMode(QListWidget.SelectionMode.NoSelection)
         self.layer_list.itemChanged.connect(self.on_layer_item_changed)
+        # 设置样式
+        self.layer_list.setStyleSheet("""
+            QListWidget {
+                background-color: #1e1e2e;
+                border: 1px solid #45475a;
+                border-radius: 5px;
+                padding: 5px;
+            }
+            QListWidget::item {
+                padding: 5px;
+                border-radius: 3px;
+                margin: 2px;
+            }
+            QListWidget::item:hover {
+                background-color: #313244;
+            }
+        """)
         render_layout.addWidget(self.layer_list)
+
+        # 地层统计信息
+        self.layer_stats_label = QLabel("地层: 0/0")
+        self.layer_stats_label.setStyleSheet("color: #7f849c; font-size: 11px;")
+        render_layout.addWidget(self.layer_stats_label)
 
         render_layout.addWidget(QLabel("渲染模式:"))
         self.render_mode_combo = QComboBox()
@@ -683,6 +725,25 @@ class GeologicalModelingApp(QMainWindow):
         self.export_flac3d_btn.clicked.connect(lambda: self.export_model('flac3d'))
         self.export_flac3d_btn.setEnabled(False)
         export_layout.addWidget(self.export_flac3d_btn)
+
+        # FLAC3D 降采样选项
+        export_layout.addWidget(QLabel("FLAC3D降采样:"))
+        self.flac3d_downsample_spin = QSpinBox()
+        self.flac3d_downsample_spin.setRange(1, 10)
+        self.flac3d_downsample_spin.setValue(1)
+        self.flac3d_downsample_spin.setSuffix("x")
+        self.flac3d_downsample_spin.setToolTip("降采样因子：2x减少75%网格，3x减少89%网格\n推荐：大模型使用2-3x，小模型使用1x")
+        export_layout.addWidget(self.flac3d_downsample_spin)
+
+        # FLAC3D 格式选择
+        export_layout.addWidget(QLabel("FLAC3D格式:"))
+        self.flac3d_format_combo = QComboBox()
+        self.flac3d_format_combo.addItems(['紧凑脚本 (推荐)', '完整脚本 (兼容)'])
+        self.flac3d_format_combo.setToolTip(
+            "紧凑脚本: 文件小50%+，加载快\n"
+            "完整脚本: 传统格式，兼容性好"
+        )
+        export_layout.addWidget(self.flac3d_format_combo)
 
         export_group.setLayout(export_layout)
         layout.addWidget(export_group)
@@ -907,8 +968,8 @@ class GeologicalModelingApp(QMainWindow):
             recommended = 'constant'
         elif n_bh < 15:
             recommended = 'idw'
-        elif n_bh < 50:
-            recommended = 'kriging'
+        # elif n_bh < 50:
+        #     recommended = 'kriging'
 
         use_traditional = self.traditional_radio.isChecked()
 
@@ -1455,25 +1516,29 @@ class GeologicalModelingApp(QMainWindow):
                 self.cached_meshes = {}
                 for i, bm in enumerate(self.block_models):
                     color = RockMaterial.get_color(bm.name, i)
-                    mesh = renderer.create_layer_mesh(
+                    main_mesh, side_mesh = renderer.create_layer_mesh(
                         self.XI, self.YI,
                         bm.top_surface, bm.bottom_surface,
                         bm.name,
                         color=color,
-                        add_sides=show_sides
+                        add_sides=show_sides,
+                        return_parts=True
                     )
                     
                     # 为纹理映射添加UV坐标
                     if render_mode == '真实纹理':
                         try:
                             # 简单的平面投影映射
-                            c = mesh.center
-                            mesh.texture_map_to_plane(origin=c, point_u=(c[0]+1, c[1], c[2]), point_v=(c[0], c[1]+1, c[2]), inplace=True)
+                            c = main_mesh.center
+                            main_mesh.texture_map_to_plane(origin=c, point_u=(c[0]+1, c[1], c[2]), point_v=(c[0], c[1]+1, c[2]), inplace=True)
                         except:
                             pass
                             
-                    self.cached_meshes[bm.name] = (mesh, color)
+                    self.cached_meshes[bm.name] = (main_mesh, side_mesh, color)
                 self.cached_sides_state = show_sides
+
+            # 初始化图例列表
+            legend_entries = []
 
             # 剖面切割模式
             if enable_slicing:
@@ -1481,21 +1546,27 @@ class GeologicalModelingApp(QMainWindow):
                 for bm in self.block_models:
                     if bm.name not in self.cached_meshes:
                         continue
-                    
+
                     # 检查是否可见（勾选）
                     is_visible = True
                     if hasattr(self, 'layer_list'):
                         items = self.layer_list.findItems(bm.name, Qt.MatchFlag.MatchExactly)
                         if items:
                             is_visible = (items[0].checkState() == Qt.CheckState.Checked)
-                    
+
                     if not is_visible:
                         continue
-                        
-                    mesh, color = self.cached_meshes[bm.name]
-                    
+
+                    main_mesh, side_mesh, color = self.cached_meshes[bm.name]
+
+                    # 添加到图例
+                    legend_entries.append((bm.name, color))
+
                     # 复制并添加颜色标量
-                    mesh_copy = mesh.copy()
+                    mesh_copy = main_mesh.copy()
+                    if side_mesh:
+                        mesh_copy = mesh_copy.merge(side_mesh)
+
                     rgb_color = (np.array(color) * 255).astype(np.uint8)
                     mesh_copy.point_data['RGB'] = np.tile(rgb_color, (mesh_copy.n_points, 1))
                     meshes_to_merge.append(mesh_copy)
@@ -1538,16 +1609,15 @@ class GeologicalModelingApp(QMainWindow):
                     # 如果不是任意方向且非交互模式，应用滑块位置
                     if axis != '任意' and not interaction:
                         self.on_slice_pos_changed(self.slice_pos_slider.value())
-            
+
             else:
-                legend_entries = []
                 # 使用缓存的网格进行渲染
                 for bm in self.block_models:
                     # 即使未选中也添加，但设置可见性
                     if bm.name not in self.cached_meshes:
                         continue
 
-                    mesh, color = self.cached_meshes[bm.name]
+                    main_mesh, side_mesh, color = self.cached_meshes[bm.name]
                     
                     # 检查是否可见（勾选）
                     is_visible = True
@@ -1563,8 +1633,13 @@ class GeologicalModelingApp(QMainWindow):
                     layer_opacity = opacity
 
                     if render_mode == '线框模式':
+                        # 合并显示
+                        full_mesh = main_mesh
+                        if side_mesh:
+                            full_mesh = full_mesh.merge(side_mesh)
+                            
                         actor = self.plotter.add_mesh(
-                            mesh,
+                            full_mesh,
                             color=color,
                             style='wireframe',
                             line_width=2,
@@ -1580,34 +1655,48 @@ class GeologicalModelingApp(QMainWindow):
                         
                         texture = self.cached_textures[bm.name]
                         
-                        # 确保网格有纹理坐标，如果没有则重新映射
-                        # 兼容不同版本的 PyVista
+                        # 确保网格有纹理坐标
                         has_t_coords = False
-                        if hasattr(mesh, 'active_t_coords'):
-                            has_t_coords = mesh.active_t_coords is not None
-                        elif hasattr(mesh, 'active_texture_coordinates'):
-                            has_t_coords = mesh.active_texture_coordinates is not None
+                        if hasattr(main_mesh, 'active_t_coords'):
+                            has_t_coords = main_mesh.active_t_coords is not None
+                        elif hasattr(main_mesh, 'active_texture_coordinates'):
+                            has_t_coords = main_mesh.active_texture_coordinates is not None
                         
                         if not has_t_coords:
-                             c = mesh.center
-                             mesh.texture_map_to_plane(origin=c, point_u=(c[0]+1, c[1], c[2]), point_v=(c[0], c[1]+1, c[2]), inplace=True)
+                             c = main_mesh.center
+                             main_mesh.texture_map_to_plane(origin=c, point_u=(c[0]+1, c[1], c[2]), point_v=(c[0], c[1]+1, c[2]), inplace=True)
 
                         actor = self.plotter.add_mesh(
-                            mesh,
+                            main_mesh,
                             texture=texture,
                             opacity=layer_opacity,
                             smooth_shading=True,
                             show_edges=show_edges,
                             edge_color='#000000',
                             line_width=1,
-                            name=bm.name
+                            name=bm.name,
+                            ambient=0.3
                         )
+                        
+                        if side_mesh:
+                            self.plotter.add_mesh(
+                                side_mesh,
+                                color=color,
+                                opacity=layer_opacity,
+                                smooth_shading=False,
+                                lighting=False,
+                                show_edges=show_edges,
+                                edge_color='#000000',
+                                line_width=1,
+                                name=f"{bm.name}_sides"
+                            )
+                            self.plotter.actors[f"{bm.name}_sides"].SetVisibility(is_visible)
 
                     elif render_mode == '增强材质':
                         # 获取PBR参数
                         pbr_params = RockMaterial.get_pbr_params(bm.name)
                         actor = self.plotter.add_mesh(
-                            mesh,
+                            main_mesh,
                             color=color,
                             opacity=layer_opacity,
                             smooth_shading=True,
@@ -1621,17 +1710,47 @@ class GeologicalModelingApp(QMainWindow):
                             line_width=1,
                             name=bm.name
                         )
+                        
+                        if side_mesh:
+                            self.plotter.add_mesh(
+                                side_mesh,
+                                color=color,
+                                opacity=layer_opacity,
+                                smooth_shading=False,
+                                lighting=False,
+                                show_edges=show_edges,
+                                edge_color='#000000',
+                                line_width=1,
+                                name=f"{bm.name}_sides"
+                            )
+                            self.plotter.actors[f"{bm.name}_sides"].SetVisibility(is_visible)
+
                     else:
                         actor = self.plotter.add_mesh(
-                            mesh,
+                            main_mesh,
                             color=color,
                             opacity=layer_opacity,
                             smooth_shading=True,
                             show_edges=show_edges,
                             edge_color='#000000',
                             line_width=1,
-                            name=bm.name
+                            name=bm.name,
+                            ambient=0.3
                         )
+                        
+                        if side_mesh:
+                            self.plotter.add_mesh(
+                                side_mesh,
+                                color=color,
+                                opacity=layer_opacity,
+                                smooth_shading=False,
+                                lighting=False,
+                                show_edges=show_edges,
+                                edge_color='#000000',
+                                line_width=1,
+                                name=f"{bm.name}_sides"
+                            )
+                            self.plotter.actors[f"{bm.name}_sides"].SetVisibility(is_visible)
                     
                     # 设置初始可见性
                     if actor:
@@ -1645,12 +1764,34 @@ class GeologicalModelingApp(QMainWindow):
 
             # 添加图例
             if legend_entries:
-                self.plotter.add_legend(
-                    legend_entries,
-                    bcolor=(0.15, 0.15, 0.2),
-                    border=True,
-                    loc='lower right'
-                )
+                try:
+                    self.plotter.add_legend(
+                        legend_entries,
+                        bcolor=(0.15, 0.15, 0.2),
+                        border=True,
+                        loc='lower right'
+                    )
+                except Exception as e:
+                    self.log(f"⚠️ 图例显示失败: {str(e)}")
+                    # 尝试简化格式
+                    try:
+                        # 确保颜色格式正确
+                        simplified_entries = []
+                        for name, color in legend_entries:
+                            # 确保color是元组且值在0-1范围内
+                            if isinstance(color, (tuple, list)) and len(color) == 3:
+                                r, g, b = color
+                                # 如果是0-255范围，转换为0-1
+                                if max(r, g, b) > 1.0:
+                                    color = (r/255.0, g/255.0, b/255.0)
+                                simplified_entries.append((str(name), color))
+
+                        if simplified_entries:
+                            self.plotter.add_legend(simplified_entries, bcolor='#252635', loc='lower right')
+                    except Exception as e2:
+                        self.log(f"✗ 图例显示完全失败: {str(e2)}")
+            else:
+                self.log("⚠️ 没有图例条目可显示")
 
             # 应用Z轴缩放
             if hasattr(self, 'z_scale_slider'):
@@ -1812,37 +1953,54 @@ class GeologicalModelingApp(QMainWindow):
         # 更新图层可见性
         for bm in self.block_models:
             actor_name = bm.name
+            is_visible = bm.name in visible_layers
+            
             if actor_name in self.plotter.actors:
                 actor = self.plotter.actors[actor_name]
-                is_visible = bm.name in visible_layers
-                
                 # 设置可见性
                 actor.SetVisibility(is_visible)
+            
+            # 更新侧面可见性
+            side_actor_name = f"{bm.name}_sides"
+            if side_actor_name in self.plotter.actors:
+                self.plotter.actors[side_actor_name].SetVisibility(is_visible)
                 
-                # 如果可见，添加到图例
-                if is_visible:
-                    # 优先从缓存获取原始颜色，避免获取到修改后的属性
-                    color = 'white'
-                    if bm.name in self.cached_meshes:
-                        _, color = self.cached_meshes[bm.name]
-                    elif hasattr(actor, 'prop'):
+            # 如果可见，添加到图例
+            if is_visible:
+                # 优先从缓存获取原始颜色，避免获取到修改后的属性
+                color = 'white'
+                if bm.name in self.cached_meshes:
+                    # 兼容旧缓存格式 (mesh, color) 和新格式 (main, side, color)
+                    cache_data = self.cached_meshes[bm.name]
+                    if len(cache_data) == 3:
+                        _, _, color = cache_data
+                    else:
+                        _, color = cache_data
+                elif actor_name in self.plotter.actors:
+                    actor = self.plotter.actors[actor_name]
+                    if hasattr(actor, 'prop'):
                         color = actor.prop.color
                         
-                    legend_entries.append((bm.name, color))
+                legend_entries.append((bm.name, color))
         
         # 更新图例
         self.plotter.remove_legend()
         if legend_entries:
-             self.plotter.add_legend(
-                legend_entries,
-                bcolor=(0.15, 0.15, 0.2),
-                border=True,
-                loc='lower right'
-            )
-                bcolor=(0.15, 0.15, 0.2),
-                border=True,
-                loc='lower right'
-            )
+            try:
+                self.plotter.add_legend(
+                    legend_entries,
+                    bcolor=(0.15, 0.15, 0.2),
+                    border=True,
+                    loc='lower right'
+                )
+            except Exception as e:
+                print(f"图例更新失败: {e}")
+                # 尝试简化格式
+                try:
+                    simplified = [(str(name), color) for name, color in legend_entries]
+                    self.plotter.add_legend(simplified, bcolor='#252635', loc='lower right')
+                except:
+                    pass
             
         # 更新等值线可见性
         if hasattr(self, 'contour_cb') and self.contour_cb.isChecked():
@@ -1868,6 +2026,13 @@ class GeologicalModelingApp(QMainWindow):
             actor_name = bm.name
             if actor_name in self.plotter.actors:
                 actor = self.plotter.actors[actor_name]
+                if hasattr(actor, 'prop'):
+                    actor.prop.opacity = opacity
+            
+            # 更新侧面透明度
+            side_actor_name = f"{bm.name}_sides"
+            if side_actor_name in self.plotter.actors:
+                actor = self.plotter.actors[side_actor_name]
                 if hasattr(actor, 'prop'):
                     actor.prop.opacity = opacity
         
@@ -1907,6 +2072,13 @@ class GeologicalModelingApp(QMainWindow):
                         if hasattr(actor, 'prop'):
                             actor.prop.show_edges = show_edges
                             updated = True
+                    
+                    # 更新侧面
+                    side_actor_name = f"{bm.name}_sides"
+                    if side_actor_name in self.plotter.actors:
+                        actor = self.plotter.actors[side_actor_name]
+                        if hasattr(actor, 'prop'):
+                            actor.prop.show_edges = show_edges
                 
                 if updated:
                     self.plotter.render()
@@ -1964,8 +2136,10 @@ class GeologicalModelingApp(QMainWindow):
 
                 selected_layers = set()
                 if hasattr(self, 'layer_list'):
-                    for item in self.layer_list.selectedItems():
-                        selected_layers.add(item.text())
+                    for i in range(self.layer_list.count()):
+                        item = self.layer_list.item(i)
+                        if item.checkState() == Qt.CheckState.Checked:
+                            selected_layers.add(item.text())
                 else:
                     selected_layers = {bm.name for bm in self.block_models}
 
@@ -1994,8 +2168,10 @@ class GeologicalModelingApp(QMainWindow):
                 # 获取选中的层
                 selected_layers = set()
                 if hasattr(self, 'layer_list'):
-                    for item in self.layer_list.selectedItems():
-                        selected_layers.add(item.text())
+                    for i in range(self.layer_list.count()):
+                        item = self.layer_list.item(i)
+                        if item.checkState() == Qt.CheckState.Checked:
+                            selected_layers.add(item.text())
                 else:
                     selected_layers = {bm.name for bm in self.block_models}
 
@@ -2030,9 +2206,41 @@ class GeologicalModelingApp(QMainWindow):
                     QMessageBox.warning(self, "警告", "没有选中的地层可导出!")
                     return
 
+                # 估算网格大小并给出建议
+                total_cells = sum([(len(ld['grid_x'])-1) * (len(ld['grid_y'])-1) for ld in layers_data])
+                downsample = self.flac3d_downsample_spin.value() if hasattr(self, 'flac3d_downsample_spin') else 1
+                estimated_cells = total_cells // (downsample * downsample)
+
+                # 大模型警告
+                if estimated_cells > 100000:
+                    reply = QMessageBox.question(
+                        self, "大模型警告",
+                        f"预计生成 {estimated_cells:,} 个单元，文件可能很大且FLAC3D加载缓慢!\n\n"
+                        f"建议:\n"
+                        f"- 当前降采样: {downsample}x\n"
+                        f"- 推荐降采样: {max(2, downsample)}x 或更高\n"
+                        f"- 或减少选中的地层数量\n\n"
+                        f"是否继续当前设置?",
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                        QMessageBox.StandardButton.No
+                    )
+                    if reply == QMessageBox.StandardButton.No:
+                        return
+
+                # 选择导出器
+                use_compact = True  # 默认使用紧凑格式
+                if hasattr(self, 'flac3d_format_combo'):
+                    use_compact = (self.flac3d_format_combo.currentIndex() == 0)
+
                 # 创建导出器并导出
                 self.log(f"导出 {len(layers_data)} 个地层到FLAC3D...")
-                exporter = EnhancedFLAC3DExporter()
+                self.log(f"降采样因子: {downsample}x (网格减少 {100*(1-1/(downsample*downsample)):.0f}%)")
+                self.log(f"格式: {'紧凑脚本' if use_compact else '完整脚本'}")
+
+                if use_compact:
+                    exporter = CompactFLAC3DExporter()
+                else:
+                    exporter = EnhancedFLAC3DExporter()
 
                 export_data = {
                     'layers': layers_data,
@@ -2041,6 +2249,7 @@ class GeologicalModelingApp(QMainWindow):
                 }
 
                 export_options = {
+                    'downsample_factor': downsample,
                     'normalize_coords': False,
                     'validate_mesh': True,
                     'coord_precision': 3

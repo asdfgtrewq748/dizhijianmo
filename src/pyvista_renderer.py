@@ -364,8 +364,9 @@ class GeologicalModelRenderer:
         name: str,
         color: Tuple[float, float, float] = None,
         texture: np.ndarray = None,
-        add_sides: bool = True
-    ) -> pv.PolyData:
+        add_sides: bool = True,
+        return_parts: bool = False
+    ) -> Union[pv.PolyData, Tuple[pv.PolyData, Optional[pv.PolyData]]]:
         """
         创建单个地层的完整 3D 网格（包含顶面、底面和侧面）
 
@@ -377,9 +378,10 @@ class GeologicalModelRenderer:
             color: 颜色 (RGB 0-1)
             texture: 纹理数组
             add_sides: 是否添加侧面
+            return_parts: 是否分开返回 (主面, 侧面)
 
         Returns:
-            PyVista PolyData 网格
+            PyVista PolyData 网格 或 (主面网格, 侧面网格)
         """
         ny, nx = XI.shape
 
@@ -391,14 +393,39 @@ class GeologicalModelRenderer:
         bottom_grid = pv.StructuredGrid(XI, YI, bottom_surface)
         bottom_surface_mesh = bottom_grid.extract_surface()
 
-        meshes = [top_surface_mesh, bottom_surface_mesh]
+        main_meshes = [top_surface_mesh, bottom_surface_mesh]
+        side_meshes = []
 
         # 添加侧面
         if add_sides:
             side_meshes = self._create_side_meshes(XI, YI, top_surface, bottom_surface)
-            meshes.extend(side_meshes)
 
-        # 合并所有网格
+        if return_parts:
+            # 合并主面
+            main_combined = main_meshes[0]
+            for mesh in main_meshes[1:]:
+                main_combined = main_combined.merge(mesh)
+            
+            # 合并侧面
+            side_combined = None
+            if side_meshes:
+                side_combined = side_meshes[0]
+                for mesh in side_meshes[1:]:
+                    side_combined = side_combined.merge(mesh)
+            
+            # 设置层名
+            try:
+                safe_name = name.encode('ascii', 'replace').decode('ascii')
+                main_combined['layer_name'] = np.array([safe_name] * main_combined.n_points, dtype='|S64')
+                if side_combined:
+                    side_combined['layer_name'] = np.array([safe_name] * side_combined.n_points, dtype='|S64')
+            except Exception:
+                pass
+                
+            return main_combined, side_combined
+
+        # 原始行为：合并所有
+        meshes = main_meshes + side_meshes
         combined = meshes[0]
         for mesh in meshes[1:]:
             combined = combined.merge(mesh)
