@@ -1403,6 +1403,16 @@ class GeologicalModelingApp(QMainWindow):
         """渲染3D模型到PyVista窗口"""
         # self.log("正在渲染3D模型...") # 减少日志刷屏
         
+        # 保存当前切割平面状态 (如果存在)
+        current_plane_origin = None
+        current_plane_normal = None
+        if hasattr(self, 'active_plane_widget') and self.active_plane_widget:
+            try:
+                current_plane_origin = self.active_plane_widget.GetOrigin()
+                current_plane_normal = self.active_plane_widget.GetNormal()
+            except:
+                pass
+
         self.active_plane_widget = None
 
 
@@ -1496,8 +1506,15 @@ class GeologicalModelingApp(QMainWindow):
                     # 确定切割参数
                     axis = self.slice_axis_combo.currentText()
                     normal = 'x'
+                    origin = None
+
                     if axis == 'Y轴': normal = 'y'
                     elif axis == 'Z轴': normal = 'z'
+                    
+                    # 如果是任意方向且有保存的状态，恢复状态
+                    if axis == '任意' and current_plane_normal is not None:
+                        normal = current_plane_normal
+                        origin = current_plane_origin
                     
                     # 添加带切割部件的网格
                     # 如果是交互式模式，启用交互
@@ -1506,6 +1523,7 @@ class GeologicalModelingApp(QMainWindow):
                     actor = self.plotter.add_mesh_clip_plane(
                         merged_mesh,
                         normal=normal,
+                        origin=origin,
                         scalars='RGB',
                         rgb=True,
                         opacity=opacity,
