@@ -1384,6 +1384,9 @@ class GeologicalModelingApp(QMainWindow):
             item.setCheckState(Qt.CheckState.Checked)
             self.layer_list.addItem(item)
 
+        # 更新统计
+        self.update_layer_stats()
+
         if PYVISTA_AVAILABLE and self.plotter is not None:
             self.render_3d_model()
 
@@ -1923,16 +1926,71 @@ class GeologicalModelingApp(QMainWindow):
         """全选地层"""
         for i in range(self.layer_list.count()):
             item = self.layer_list.item(i)
-            item.setCheckState(Qt.CheckState.Checked)
+            if not item.isHidden():  # 只选择可见的项
+                item.setCheckState(Qt.CheckState.Checked)
+        self.update_layer_stats()
 
     def deselect_all_layers(self):
         """全不选地层"""
         for i in range(self.layer_list.count()):
             item = self.layer_list.item(i)
-            item.setCheckState(Qt.CheckState.Unchecked)
+            if not item.isHidden():  # 只操作可见的项
+                item.setCheckState(Qt.CheckState.Unchecked)
+        self.update_layer_stats()
+
+    def invert_layer_selection(self):
+        """反选地层"""
+        for i in range(self.layer_list.count()):
+            item = self.layer_list.item(i)
+            if not item.isHidden():  # 只操作可见的项
+                if item.checkState() == Qt.CheckState.Checked:
+                    item.setCheckState(Qt.CheckState.Unchecked)
+                else:
+                    item.setCheckState(Qt.CheckState.Checked)
+        self.update_layer_stats()
+
+    def filter_layers(self, text):
+        """过滤地层列表"""
+        search_text = text.lower().strip()
+
+        for i in range(self.layer_list.count()):
+            item = self.layer_list.item(i)
+            layer_name = item.text().lower()
+
+            # 如果搜索文本为空或者匹配，显示该项
+            if not search_text or search_text in layer_name:
+                item.setHidden(False)
+            else:
+                item.setHidden(True)
+
+        # 更新统计
+        self.update_layer_stats()
+
+    def update_layer_stats(self):
+        """更新地层统计信息"""
+        if not hasattr(self, 'layer_stats_label'):
+            return
+
+        total = self.layer_list.count()
+        checked = 0
+        visible = 0
+
+        for i in range(total):
+            item = self.layer_list.item(i)
+            if not item.isHidden():
+                visible += 1
+                if item.checkState() == Qt.CheckState.Checked:
+                    checked += 1
+
+        # 更新标签
+        if visible < total:
+            self.layer_stats_label.setText(f"已选: {checked}/{visible} (共{total}层)")
+        else:
+            self.layer_stats_label.setText(f"已选: {checked}/{total}")
 
     def on_layer_item_changed(self, item):
         """地层勾选状态改变"""
+        self.update_layer_stats()
         self.update_layer_visibility()
 
     def update_layer_visibility(self):
