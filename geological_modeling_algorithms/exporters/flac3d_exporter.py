@@ -198,7 +198,7 @@ class FLAC3DExporter(BaseExporter):
         lines.append(f"; Total Zones: {len(zones)}\n")
         lines.append("\n")
         lines.append("model new\n")
-        lines.append("model large-strain off\n")
+        lines.append("model largestrain off\n")
         lines.append("\n")
         
         # 创建节点映射表（FLAC3D会自动分配ID）
@@ -209,7 +209,7 @@ class FLAC3DExporter(BaseExporter):
             nx = x - x_off
             ny = y - y_off
             nz = z - z_off
-            lines.append(f"zone gridpoint create position ({nx:.4f},{ny:.4f},{nz:.4f})\n")
+            lines.append(f"zone gridpoint create ({nx:.4f},{ny:.4f},{nz:.4f})\n")
             node_map[nid] = idx
         
         print(f"[FLAC3D Export] 节点数据已格式化 ({len(nodes)} 个节点)")
@@ -224,7 +224,7 @@ class FLAC3DExporter(BaseExporter):
                 # 将原始节点ID映射为FLAC3D的顺序ID
                 mapped_nids = [node_map[nid] for nid in nids]
                 gp_str = " ".join(map(str, mapped_nids))
-                lines.append(f"zone create brick gridpoint {gp_str} group '{group}'\n")
+                lines.append(f"zone create brick point-id {gp_str} group '{group}'\n")
         
         print(f"[FLAC3D Export] 单元数据已格式化 ({len(zones)} 个单元)")
         

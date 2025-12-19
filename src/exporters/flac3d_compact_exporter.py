@@ -31,7 +31,7 @@ class CompactFLAC3DExporter(EnhancedFLAC3DExporter):
             # 最小化文件头
             f.write(f"; FLAC3D Compact Grid - {len(self.nodes)} nodes, {len(self.zones)} zones\n")
             f.write("model new\n")
-            f.write("model large-strain off\n\n")
+            f.write("model largestrain off\n\n")
 
             # 批量创建节点 - 修复语法：不使用id参数
             print(f"  写入 {len(self.nodes):,} 个节点...")
@@ -40,9 +40,8 @@ class CompactFLAC3DExporter(EnhancedFLAC3DExporter):
             # FLAC3D 7.0+ 会自动分配ID，所以我们需要记录映射关系
             # 但是由于我们按顺序创建，ID应该是连续的
             for node in self.nodes:
-                # 正确语法：zone gridpoint create position (x,y,z)
-                # 不需要 "id X" 参数
-                f.write(f"zone gridpoint create position ({node.x:.3f},{node.y:.3f},{node.z:.3f})\n")
+                # 正确语法：zone gridpoint create (x,y,z)
+                f.write(f"zone gridpoint create ({node.x:.3f},{node.y:.3f},{node.z:.3f})\n")
 
             # 批量创建单元 - 修复语法
             print(f"  写入 {len(self.zones):,} 个单元...")

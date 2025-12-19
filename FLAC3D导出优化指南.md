@@ -165,7 +165,7 @@ program call 'model.f3dat' from 50001 to end
 
 ```fish
 ; 在加载前设置
-model large-strain off  ; 关闭大变形（加快加载）
+model largestrain off  ; 关闭大变形（加快加载）
 model configure dynamic off  ; 关闭动力学（如不需要）
 ```
 

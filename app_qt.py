@@ -77,9 +77,12 @@ if PYVISTA_AVAILABLE:
 try:
     from src.exporters.flac3d_enhanced_exporter import EnhancedFLAC3DExporter
     from src.exporters.flac3d_compact_exporter import CompactFLAC3DExporter
+    from src.exporters.f3grid_exporter_v2 import F3GridExporterV2
     FLAC3D_EXPORTER_AVAILABLE = True
+    F3GRID_V2_AVAILABLE = True
 except ImportError:
     FLAC3D_EXPORTER_AVAILABLE = False
+    F3GRID_V2_AVAILABLE = False
     print("Warning: FLAC3D exporter not available")
 
 
@@ -124,6 +127,7 @@ class GeologicalModelingApp(QMainWindow):
         self.cached_textures = {} # 纹理缓存
         self.cached_sides_state = None
         self.mesh_cache = {}  # 按是否生成侧面缓存不同的网格
+        self.merged_mesh_cache = None  # 剖面切割用的合并网格缓存
         self.is_rendering = False
         
         # 渲染状态跟踪
@@ -612,15 +616,18 @@ class GeologicalModelingApp(QMainWindow):
         # 地层选择工具栏 - 改进
         layer_toolbar = QHBoxLayout()
         self.select_all_btn = QPushButton("全选")
-        self.select_all_btn.setMaximumWidth(50)
+        self.select_all_btn.setMaximumWidth(60)
+        self.select_all_btn.setFont(QFont("Microsoft YaHei", 9))
         self.select_all_btn.clicked.connect(self.select_all_layers)
 
-        self.select_none_btn = QPushButton("全不选")
+        self.select_none_btn = QPushButton("清空")
         self.select_none_btn.setMaximumWidth(60)
+        self.select_none_btn.setFont(QFont("Microsoft YaHei", 9))
         self.select_none_btn.clicked.connect(self.deselect_all_layers)
 
         self.invert_selection_btn = QPushButton("反选")
-        self.invert_selection_btn.setMaximumWidth(50)
+        self.invert_selection_btn.setMaximumWidth(60)
+        self.invert_selection_btn.setFont(QFont("Microsoft YaHei", 9))
         self.invert_selection_btn.clicked.connect(self.invert_layer_selection)
 
         layer_toolbar.addWidget(self.select_all_btn)
@@ -696,7 +703,7 @@ class GeologicalModelingApp(QMainWindow):
 
         self.show_edges_cb = QCheckBox("显示网格")
         self.show_edges_cb.setChecked(False)
-        self.show_edges_cb.stateChanged.connect(self.refresh_render)
+        self.show_edges_cb.stateChanged.connect(self.on_edges_toggled)
         render_layout.addWidget(self.show_edges_cb)
 
         self.show_boreholes_cb = QCheckBox("显示钻孔")
@@ -802,10 +809,11 @@ class GeologicalModelingApp(QMainWindow):
         # FLAC3D 格式选择
         export_layout.addWidget(QLabel("FLAC3D格式:"))
         self.flac3d_format_combo = QComboBox()
-        self.flac3d_format_combo.addItems(['紧凑脚本 (推荐)', '完整脚本 (兼容)'])
+        self.flac3d_format_combo.addItems(['f3grid (推荐)', '紧凑脚本', '完整脚本'])
         self.flac3d_format_combo.setToolTip(
-            "紧凑脚本: 文件小50%+，加载快\n"
-            "完整脚本: 传统格式，兼容性好"
+            "f3grid: 原生网格格式，使用 zone import f3grid 导入\n"
+            "紧凑脚本: .f3dat 格式，文件小\n"
+            "完整脚本: .f3dat 传统格式，兼容性好"
         )
         export_layout.addWidget(self.flac3d_format_combo)
 
@@ -1641,6 +1649,7 @@ class GeologicalModelingApp(QMainWindow):
         self.cached_textures = {}
         self.cached_sides_state = None
         self.mesh_cache = {}
+        self.merged_mesh_cache = None  # 清空剖面合并网格缓存
 
         self.set_busy_state(False)
         self.progress_bar.setVisible(False)
@@ -1834,9 +1843,9 @@ class GeologicalModelingApp(QMainWindow):
                 cleaned,
                 bcolor='#252635', # 深色背景，与主题一致
                 border=True,
-                loc='lower right',
-                size=(0.2, 0.4), # 稍微调大一点
-                background_opacity=0.8
+                loc='upper left',  # 改到左上角，不遮挡主视图
+                size=(0.15, 0.35), # 稍微缩小
+                background_opacity=0.85
             )
             
             # 设置字体和颜色
@@ -1937,39 +1946,68 @@ class GeologicalModelingApp(QMainWindow):
 
             legend_entries = []
 
-            # 剖面切割模式 (较慢，需要合并网格)
+            # 剖面切割模式 (使用缓存优化)
             if enable_slicing:
-                meshes_to_merge = []
+                # 获取当前可见层的哈希，用于缓存判断
+                visible_layers = []
                 for bm in self.block_models:
                     if bm.name not in self.cached_meshes:
                         continue
-
-                    # 检查可见性
                     is_visible = True
                     if hasattr(self, 'layer_list'):
                         items = self.layer_list.findItems(bm.name, Qt.MatchFlag.MatchExactly)
                         if items:
                             is_visible = (items[0].checkState() == Qt.CheckState.Checked)
-
-                    if not is_visible:
-                        continue
-
-                    main_mesh, side_mesh, color = self.cached_meshes[bm.name]
-                    legend_entries.append((bm.name, color))
-
-                    # 复制并添加颜色标量
-                    mesh_copy = main_mesh.copy()
-                    if side_mesh:
-                        mesh_copy = mesh_copy.merge(side_mesh, merge_points=False)
-
-                    rgb_color = (np.array(color) * 255).astype(np.uint8)
-                    mesh_copy.point_data['RGB'] = np.tile(rgb_color, (mesh_copy.n_points, 1))
-                    meshes_to_merge.append(mesh_copy)
+                    if is_visible:
+                        visible_layers.append(bm.name)
                 
-                if meshes_to_merge:
-                    # 批量合并比逐个合并快
-                    merged_mesh = meshes_to_merge[0].merge(meshes_to_merge[1:], merge_points=False)
+                visible_key = tuple(visible_layers)
+                
+                # 检查是否可以使用缓存的合并网格
+                if (self.merged_mesh_cache is not None and 
+                    hasattr(self, '_merged_mesh_visible_key') and 
+                    self._merged_mesh_visible_key == visible_key and
+                    hasattr(self, '_merged_mesh_sides_key') and
+                    self._merged_mesh_sides_key == show_sides):
+                    merged_mesh = self.merged_mesh_cache
+                    self.log("使用缓存的合并网格...")
+                else:
+                    # 需要重新合并网格
+                    self.log("正在合并网格用于剖面切割...")
+                    meshes_to_merge = []
+                    for bm in self.block_models:
+                        if bm.name not in visible_layers:
+                            continue
+
+                        main_mesh, side_mesh, color = self.cached_meshes[bm.name]
+                        legend_entries.append((bm.name, color))
+
+                        # 复制并添加颜色标量
+                        mesh_copy = main_mesh.copy()
+                        if side_mesh and show_sides:
+                            mesh_copy = mesh_copy.merge(side_mesh, merge_points=False)
+
+                        rgb_color = (np.array(color) * 255).astype(np.uint8)
+                        mesh_copy.point_data['RGB'] = np.tile(rgb_color, (mesh_copy.n_points, 1))
+                        meshes_to_merge.append(mesh_copy)
                     
+                    if meshes_to_merge:
+                        merged_mesh = meshes_to_merge[0].merge(meshes_to_merge[1:], merge_points=False)
+                        # 缓存合并网格
+                        self.merged_mesh_cache = merged_mesh
+                        self._merged_mesh_visible_key = visible_key
+                        self._merged_mesh_sides_key = show_sides
+                    else:
+                        merged_mesh = None
+                
+                # 填充图例
+                if not legend_entries:
+                    for bm_name in visible_layers:
+                        if bm_name in self.cached_meshes:
+                            _, _, color = self.cached_meshes[bm_name]
+                            legend_entries.append((bm_name, color))
+                
+                if merged_mesh is not None:
                     # 切割参数
                     axis = self.slice_axis_combo.currentText()
                     normal = 'x'
@@ -2288,7 +2326,14 @@ class GeologicalModelingApp(QMainWindow):
     def on_layer_item_changed(self, item):
         """地层勾选状态改变"""
         self.update_layer_stats()
-        self.update_layer_visibility()
+        
+        # 如果开启了剖面模式，需要清除合并网格缓存并重新渲染
+        if hasattr(self, 'slice_cb') and self.slice_cb.isChecked():
+            self.merged_mesh_cache = None
+            self.request_render()
+        else:
+            # 标准模式下只更新可见性
+            self.update_layer_visibility()
 
     def update_layer_visibility(self):
         """更新图层可见性和图例 - 优化版"""
@@ -2441,6 +2486,37 @@ class GeologicalModelingApp(QMainWindow):
         """
         QMessageBox.information(self, f"属性 - {layer_name}", msg)
 
+    def on_edges_toggled(self):
+        """网格显示切换 - 轻量级更新"""
+        if not self.plotter or not self.block_models:
+            return
+        
+        show_edges = self.show_edges_cb.isChecked()
+        
+        # 直接更新所有Actor的边缘显示属性，无需重建场景
+        try:
+            for bm in self.block_models:
+                actor_name = bm.name
+                if actor_name in self.plotter.actors:
+                    actor = self.plotter.actors[actor_name]
+                    if hasattr(actor, 'prop'):
+                        actor.prop.show_edges = show_edges
+                        actor.prop.edge_color = (0, 0, 0)  # 黑色边缘
+                
+                # 更新侧面
+                side_actor_name = f"{bm.name}_sides"
+                if side_actor_name in self.plotter.actors:
+                    actor = self.plotter.actors[side_actor_name]
+                    if hasattr(actor, 'prop'):
+                        actor.prop.show_edges = show_edges
+                        actor.prop.edge_color = (0, 0, 0)
+            
+            self.plotter.render()
+        except Exception as e:
+            self.log(f"切换网格显示失败: {e}")
+            # 回退到完整重建
+            self.request_render()
+
     def on_render_mode_changed(self, mode: str):
         """渲染模式改变"""
         if self.block_models is not None:
@@ -2472,9 +2548,30 @@ class GeologicalModelingApp(QMainWindow):
         self.plotter.render()
 
     def on_sides_toggled(self):
-        """侧面显示切换"""
-        if self.block_models is not None:
-            self.request_render()
+        """侧面显示切换 - 轻量级更新"""
+        if not self.plotter or not self.block_models:
+            return
+        
+        show_sides = self.show_sides_cb.isChecked()
+        
+        # 检查是否有侧面Actor存在
+        has_side_actors = any(
+            f"{bm.name}_sides" in self.plotter.actors 
+            for bm in self.block_models
+        )
+        
+        if has_side_actors:
+            # 侧面Actor已存在，只切换可见性
+            for bm in self.block_models:
+                side_actor_name = f"{bm.name}_sides"
+                if side_actor_name in self.plotter.actors:
+                    actor = self.plotter.actors[side_actor_name]
+                    actor.SetVisibility(show_sides)
+            self.plotter.render()
+        else:
+            # 侧面Actor不存在，需要重建（只在开启侧面时）
+            if show_sides:
+                self.request_render()
 
     def on_boreholes_toggled(self):
         """钻孔显示切换 - 实时"""
@@ -2492,33 +2589,8 @@ class GeologicalModelingApp(QMainWindow):
                      self.plotter.remove_actor(f'label_{i}')
 
     def refresh_render(self):
-        """刷新渲染"""
+        """刷新渲染 - 强制完整重建"""
         if self.block_models is not None and PYVISTA_AVAILABLE and self.plotter is not None:
-            # 尝试轻量级更新网格显示
-            try:
-                show_edges = self.show_edges_cb.isChecked()
-                updated = False
-                for bm in self.block_models:
-                    actor_name = bm.name
-                    if actor_name in self.plotter.actors:
-                        actor = self.plotter.actors[actor_name]
-                        if hasattr(actor, 'prop'):
-                            actor.prop.show_edges = show_edges
-                            updated = True
-                    
-                    # 更新侧面
-                    side_actor_name = f"{bm.name}_sides"
-                    if side_actor_name in self.plotter.actors:
-                        actor = self.plotter.actors[side_actor_name]
-                        if hasattr(actor, 'prop'):
-                            actor.prop.show_edges = show_edges
-                
-                if updated:
-                    self.plotter.render()
-                    return
-            except:
-                pass
-                
             self.render_3d_model()
 
     def export_model(self, format_type: str):
@@ -2548,9 +2620,16 @@ class GeologicalModelingApp(QMainWindow):
                 self, "保存VTK", "geological_model.vtk", "VTK Files (*.vtk)"
             )
         elif format_type == 'flac3d':
-            file_path, _ = QFileDialog.getSaveFileName(
-                self, "保存FLAC3D网格", "geological_model.f3dat", "FLAC3D Files (*.f3dat *.flac3d)"
-            )
+            # 根据格式选择确定文件扩展名
+            format_idx = self.flac3d_format_combo.currentIndex() if hasattr(self, 'flac3d_format_combo') else 0
+            if format_idx == 0:  # f3grid
+                file_path, _ = QFileDialog.getSaveFileName(
+                    self, "保存FLAC3D网格", "geological_model.f3grid", "FLAC3D Grid Files (*.f3grid)"
+                )
+            else:  # f3dat 脚本
+                file_path, _ = QFileDialog.getSaveFileName(
+                    self, "保存FLAC3D脚本", "geological_model.f3dat", "FLAC3D Files (*.f3dat)"
+                )
         else:
             return
 
@@ -2660,45 +2739,82 @@ class GeologicalModelingApp(QMainWindow):
                     if reply == QMessageBox.StandardButton.No:
                         return
 
-                # 选择导出器
-                use_compact = True  # 默认使用紧凑格式
+                # 选择导出器格式
+                # 0: f3grid (推荐), 1: 紧凑脚本, 2: 完整脚本
+                format_idx = 0
                 if hasattr(self, 'flac3d_format_combo'):
-                    use_compact = (self.flac3d_format_combo.currentIndex() == 0)
+                    format_idx = self.flac3d_format_combo.currentIndex()
 
+                format_names = ['f3grid', '紧凑脚本', '完整脚本']
                 # 创建导出器并导出
                 self.log(f"导出 {len(layers_data)} 个地层到FLAC3D...")
                 self.log(f"降采样因子: {downsample}x (网格减少 {100*(1-1/(downsample*downsample)):.0f}%)")
-                self.log(f"格式: {'紧凑脚本' if use_compact else '完整脚本'}")
+                self.log(f"格式: {format_names[format_idx]}")
 
-                if use_compact:
+                if format_idx == 0:  # f3grid 格式
+                    if not F3GRID_V2_AVAILABLE:
+                        QMessageBox.warning(self, "警告", "F3Grid导出器不可用!\n请检查 src/exporters/f3grid_exporter_v2.py")
+                        return
+
+                    exporter = F3GridExporterV2()
+                    export_options = {
+                        'downsample_factor': downsample,
+                        'min_zone_thickness': 0.001,
+                        'coord_precision': 6
+                    }
+
+                    exporter.export(
+                        data={'layers': layers_data},
+                        output_path=file_path,
+                        options=export_options
+                    )
+
+                    self.log(f"FLAC3D导出统计:")
+                    self.log(f"  总节点数: {exporter.stats.total_gridpoints}")
+                    self.log(f"  共享节点数: {exporter.stats.shared_nodes}")
+                    self.log(f"  总单元数: {exporter.stats.total_zones}")
+                    if exporter.stats.min_thickness < float('inf'):
+                        self.log(f"  厚度范围: {exporter.stats.min_thickness:.3f}m - {exporter.stats.max_thickness:.3f}m")
+                    self.log(f"\n在FLAC3D中导入:")
+                    self.log(f'  zone import f3grid "{os.path.basename(file_path)}"')
+
+                elif format_idx == 1:  # 紧凑脚本
                     exporter = CompactFLAC3DExporter()
-                else:
+                    export_options = {
+                        'downsample_factor': downsample,
+                        'normalize_coords': False,
+                        'validate_mesh': True,
+                        'coord_precision': 3
+                    }
+                    exporter.export(
+                        data={'layers': layers_data, 'title': 'GNN地质建模系统', 'author': 'PyQt6版'},
+                        output_path=file_path,
+                        options=export_options
+                    )
+                    self.log(f"FLAC3D导出统计:")
+                    self.log(f"  总节点数: {exporter.stats['total_nodes']}")
+                    self.log(f"  共享节点数: {exporter.stats['shared_nodes']}")
+                    self.log(f"  总单元数: {exporter.stats['total_zones']}")
+                    self.log(f"  厚度范围: {exporter.stats['min_thickness']:.2f}m - {exporter.stats['max_thickness']:.2f}m")
+
+                else:  # 完整脚本
                     exporter = EnhancedFLAC3DExporter()
-
-                export_data = {
-                    'layers': layers_data,
-                    'title': 'GNN地质建模系统 - 三维模型',
-                    'author': 'PyQt6高性能版'
-                }
-
-                export_options = {
-                    'downsample_factor': downsample,
-                    'normalize_coords': False,
-                    'validate_mesh': True,
-                    'coord_precision': 3
-                }
-
-                exporter.export(
-                    data=export_data,
-                    output_path=file_path,
-                    options=export_options
-                )
-
-                self.log(f"FLAC3D导出统计:")
-                self.log(f"  总节点数: {exporter.stats['total_nodes']}")
-                self.log(f"  共享节点数: {exporter.stats['shared_nodes']}")
-                self.log(f"  总单元数: {exporter.stats['total_zones']}")
-                self.log(f"  厚度范围: {exporter.stats['min_thickness']:.2f}m - {exporter.stats['max_thickness']:.2f}m")
+                    export_options = {
+                        'downsample_factor': downsample,
+                        'normalize_coords': False,
+                        'validate_mesh': True,
+                        'coord_precision': 3
+                    }
+                    exporter.export(
+                        data={'layers': layers_data, 'title': 'GNN地质建模系统', 'author': 'PyQt6版'},
+                        output_path=file_path,
+                        options=export_options
+                    )
+                    self.log(f"FLAC3D导出统计:")
+                    self.log(f"  总节点数: {exporter.stats['total_nodes']}")
+                    self.log(f"  共享节点数: {exporter.stats['shared_nodes']}")
+                    self.log(f"  总单元数: {exporter.stats['total_zones']}")
+                    self.log(f"  厚度范围: {exporter.stats['min_thickness']:.2f}m - {exporter.stats['max_thickness']:.2f}m")
 
             self.log(f"✓ 导出成功: {file_path}")
             

@@ -607,7 +607,7 @@ class EnhancedFLAC3DExporter:
             # 初始化模型
             write_line("; Initialize model")
             write_line("model new")
-            write_line("model large-strain off\n")
+            write_line("model largestrain off\n")
 
             # 创建节点
             write_line("; ============================================")
@@ -616,7 +616,7 @@ class EnhancedFLAC3DExporter:
             
             # 批量处理节点
             for i, node in enumerate(self.nodes):
-                write_line(f"zone gridpoint create id {node.id} position ({node.x:.6f},{node.y:.6f},{node.z:.6f})")
+                write_line(f"zone gridpoint create ({node.x:.6f},{node.y:.6f},{node.z:.6f})")
                 if i % 10000 == 0 and i > 0:
                     print(f"  写入节点: {i}/{len(self.nodes)}", end='\r')
             write_line("")

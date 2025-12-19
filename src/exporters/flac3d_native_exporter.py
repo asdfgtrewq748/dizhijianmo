@@ -62,7 +62,7 @@ class FLAC3DNativeExporter(EnhancedFLAC3DExporter):
             f.write(f"; Total zones: {len(self.zones)}\n\n")
 
             f.write("model new\n")
-            f.write("model large-strain off\n\n")
+            f.write("model largestrain off\n\n")
 
             # 使用zone generate命令创建规则网格
             f.write("; Generate base grid\n")

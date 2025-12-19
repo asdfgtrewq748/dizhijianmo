@@ -88,7 +88,7 @@ zone gridpoint create id 1 position 495394.969,5403690.000,0.000
 
 ### 正确的语法（已修复）
 ```fish
-zone gridpoint create position (495394.969,5403690.000,0.000)
+zone gridpoint create (495394.969,5403690.000,0.000)
 ✅ FLAC3D 7.0+ 正确语法
 ```
 
@@ -141,11 +141,11 @@ zone gridpoint create position (495394.969,5403690.000,0.000)
 ```fish
 ; FLAC3D Compact Grid - 10000 nodes, 8000 zones
 model new
-model large-strain off
+model largestrain off
 
 ; Create gridpoints
-zone gridpoint create position (495394.969,5403690.000,0.000)
-zone gridpoint create position (495395.969,5403690.000,0.000)
+zone gridpoint create (495394.969,5403690.000,0.000)
+zone gridpoint create (495395.969,5403690.000,0.000)
 ...
 
 ; Create zones

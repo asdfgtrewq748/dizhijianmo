@@ -671,12 +671,14 @@ class GeologicalModelBuilder:
     def enforce_columnwise_order(
         self,
         block_models: List[BlockModel],
-        min_gap: float = 0.5
+        min_gap: float = 0.0
     ):
         """
         逐列强制垂向顺序（来自成熟项目）
 
-        对每个(y,x)垂直柱子强制重排层序，确保相邻层之间有最小间隙
+        对每个(y,x)垂直柱子强制重排层序，确保相邻层之间无重叠
+
+        注意: min_gap 设为 0 以保证层间节点共享，这对 FLAC3D 导出很重要
         """
         if len(block_models) < 2:
             return

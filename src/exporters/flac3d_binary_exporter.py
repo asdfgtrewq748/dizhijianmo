@@ -234,12 +234,12 @@ class FLAC3DBinaryExporter:
             f.write("; This script creates the mesh efficiently\n\n")
 
             f.write("model new\n")
-            f.write("model large-strain off\n\n")
+            f.write("model largestrain off\n\n")
 
             # 批量创建节点 - 使用紧凑格式
             f.write("; Creating gridpoints\n")
             for node in self.nodes:
-                f.write(f"zone gridpoint create id {node.id} position {node.x:.3f},{node.y:.3f},{node.z:.3f}\n")
+                f.write(f"zone gridpoint create ({node.x:.3f},{node.y:.3f},{node.z:.3f})\n")
 
             # 批量创建单元 - 使用紧凑格式
             f.write("\n; Creating zones\n")
