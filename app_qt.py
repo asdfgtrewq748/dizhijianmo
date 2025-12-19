@@ -1788,7 +1788,7 @@ class GeologicalModelingApp(QMainWindow):
         return texture
 
     def add_legend_safe(self, legend_entries):
-        """统一处理图例显示，保证深色背景下文字可见"""
+        """统一处理图例显示，保证深色背景下文字可见（支持中文）"""
         try:
             self.plotter.remove_legend()
         except Exception:
@@ -1799,7 +1799,7 @@ class GeologicalModelingApp(QMainWindow):
 
         cleaned = []
         for idx, (name, color) in enumerate(legend_entries):
-            # 给标签编号，避免中文字体缺失导致不显示
+            # 给标签编号
             label = f"{idx+1}. {name}"
             # 颜色归一化到0-1，并确保是tuple
             if isinstance(color, (tuple, list)) and len(color) == 3:
@@ -1816,6 +1816,19 @@ class GeologicalModelingApp(QMainWindow):
             cleaned.append(("... 更多", (0.7, 0.7, 0.7)))
 
         try:
+            # 查找系统中文字体路径
+            chinese_font_path = None
+            possible_fonts = [
+                "C:/Windows/Fonts/msyh.ttc",      # 微软雅黑
+                "C:/Windows/Fonts/simhei.ttf",    # 黑体
+                "C:/Windows/Fonts/simsun.ttc",    # 宋体
+                "C:/Windows/Fonts/simkai.ttf",    # 楷体
+            ]
+            for font_path in possible_fonts:
+                if os.path.exists(font_path):
+                    chinese_font_path = font_path
+                    break
+            
             # 使用更美观的图例设置
             legend_actor = self.plotter.add_legend(
                 cleaned,
@@ -1826,14 +1839,21 @@ class GeologicalModelingApp(QMainWindow):
                 background_opacity=0.8
             )
             
-            # 强制白色文字，避免在深色背景下不可见
+            # 设置字体和颜色
             if legend_actor and hasattr(legend_actor, "GetEntryTextProperty"):
                 prop = legend_actor.GetEntryTextProperty()
                 prop.SetColor(1.0, 1.0, 1.0) # 纯白
-                prop.SetFontFamilyToArial()  # 使用Arial字体（VTK方法）
-                prop.SetFontSize(14)         # 稍微调大字体
-                prop.SetBold(False)          # 取消加粗，看起来更清爽
+                prop.SetFontSize(14)         # 字体大小
+                prop.SetBold(False)          # 取消加粗
                 prop.SetShadow(False)
+                
+                # 设置中文字体（关键修复）
+                if chinese_font_path:
+                    prop.SetFontFile(chinese_font_path)
+                    prop.SetFontFamily(4)  # VTK_FONT_FILE = 4，使用自定义字体文件
+                else:
+                    # 回退到Arial
+                    prop.SetFontFamilyToArial()
                 
             # 设置边框颜色
             if legend_actor and hasattr(legend_actor, "GetBorderProperty"):

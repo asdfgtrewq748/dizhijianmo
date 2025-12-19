@@ -1,25 +1,25 @@
 FLAC3D Mesh Quality Report
 ==========================
 
-Total nodes: 95000
-Shared nodes: 600808
-Total zones: 81392
+Total nodes: 43928
+Shared nodes: 265320
+Total zones: 36642
 Groups: 95
-Z layers: 90616
-Thickness range: 1.0000 - 82.2391 m
+Z layers: 42803
+Thickness range: 1.0000 - 79.9965 m
 
 Node usage
   Max shared: 8
-  Avg shared: 6.87
+  Avg shared: 6.68
 
 Volumes
-  Negative volume zones: 44040
-  Fixed negative zones: 38456
-  Skipped zones (unfixed): 5584
-  Sample zone ids: [3, 4, 5, 6, 7, 8, 9, 9, 9, 9, 9, 9, 9, 9, 20, 21, 22, 23, 24, 25]
+  Negative volume zones: 19667
+  Fixed negative zones: 17653
+  Skipped zones (unfixed): 2014
+  Sample zone ids: [2, 3, 4, 5, 6, 7, 7, 7, 7, 15, 16, 17, 18, 19, 19, 19, 19, 27, 28, 29]
 
 Geometry
-  Max aspect ratio: 109.191
+  Max aspect ratio: 170.581
 Coordinates
   Offset: (0.0, 0.0, 0.0)
   Precision: 3

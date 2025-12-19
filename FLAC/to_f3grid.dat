@@ -1,0 +1,11 @@
+; FLAC3D Grid Converter
+; Run this in FLAC3D to create binary .f3grid file
+
+; Load the model
+program call 'geological_model.f3dat'
+
+; Save as binary
+model save 'geological_model.f3grid'
+
+; Conversion complete!
+; Use: model restore 'geological_model.f3grid'
