@@ -35,7 +35,7 @@ from PyQt6.QtWidgets import (
     QGroupBox, QTextEdit, QProgressBar, QTabWidget, QCheckBox,
     QSplitter, QSlider, QListWidget, QListWidgetItem, QMessageBox, QFileDialog,
     QScrollArea, QFrame, QDialog, QTableWidget, QTableWidgetItem, QHeaderView,
-    QMenuBar, QMenu
+    QMenuBar, QMenu, QDialogButtonBox
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QSettings
 from PyQt6.QtGui import QFont, QTextCursor, QAction, QCloseEvent
@@ -63,10 +63,11 @@ from src.thickness_predictor_v2 import (
 
 # Refactored GUI modules
 from src.gui.workers import (
-    DataLoaderThread, TrainingThread, 
+    DataLoaderThread, TrainingThread,
     TraditionalPredictorThread, ModelingThread
 )
 from src.gui.dialogs import BoreholeInfoDialog
+from src.gui.progress_dialog import ModernProgressDialog
 from src.gui.styles import MODERN_STYLE
 from src.gui.utils import setup_logging, global_exception_hook
 
@@ -78,12 +79,15 @@ try:
     from src.exporters.flac3d_enhanced_exporter import EnhancedFLAC3DExporter
     from src.exporters.flac3d_compact_exporter import CompactFLAC3DExporter
     from src.exporters.f3grid_exporter_v2 import F3GridExporterV2
+    from src.exporters.fpn_exporter import FPNExporter
     FLAC3D_EXPORTER_AVAILABLE = True
     F3GRID_V2_AVAILABLE = True
-except ImportError:
+    FPN_EXPORTER_AVAILABLE = True
+except ImportError as e:
     FLAC3D_EXPORTER_AVAILABLE = False
     F3GRID_V2_AVAILABLE = False
-    print("Warning: FLAC3D exporter not available")
+    FPN_EXPORTER_AVAILABLE = False
+    print(f"Warning: FLAC3D exporter not available: {e}")
 
 
 # =============================================================================
@@ -809,13 +813,24 @@ class GeologicalModelingApp(QMainWindow):
         # FLAC3D 格式选择
         export_layout.addWidget(QLabel("FLAC3D格式:"))
         self.flac3d_format_combo = QComboBox()
-        self.flac3d_format_combo.addItems(['f3grid (推荐)', '紧凑脚本', '完整脚本'])
+        self.flac3d_format_combo.addItems(['f3grid (推荐)', 'FPN (中间格式)', '紧凑脚本', '完整脚本'])
         self.flac3d_format_combo.setToolTip(
             "f3grid: 原生网格格式，使用 zone import f3grid 导入\n"
+            "FPN: Midas GTS NX中间格式，可用转换工具转换为f3grid\n"
             "紧凑脚本: .f3dat 格式，文件小\n"
             "完整脚本: .f3dat 传统格式，兼容性好"
         )
         export_layout.addWidget(self.flac3d_format_combo)
+
+        # 接触面选项（仅对 f3grid 和 FPN 格式有效）
+        self.create_interfaces_checkbox = QCheckBox("创建层间接触面 (Interface)")
+        self.create_interfaces_checkbox.setToolTip(
+            "启用后，层间节点不共享，并生成接触面定义脚本\n"
+            "用于模拟层间滑动、分离等接触行为\n"
+            "注意：仅对 f3grid 和 FPN 格式有效"
+        )
+        self.create_interfaces_checkbox.setChecked(False)
+        export_layout.addWidget(self.create_interfaces_checkbox)
 
         export_group.setLayout(export_layout)
         layout.addWidget(export_group)
@@ -1172,6 +1187,15 @@ class GeologicalModelingApp(QMainWindow):
         self.log("使用传统地质统计学方法...")
         self.use_traditional = True
 
+        # 创建进度对话框
+        self.progress_dialog = ModernProgressDialog(
+            self,
+            "模型训练",
+            "正在初始化传统插值模型..."
+        )
+        self.progress_dialog.set_indeterminate(False)
+        self.progress_dialog.set_progress(0)
+
         self.set_busy_state(True)
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, 0)
@@ -1182,9 +1206,12 @@ class GeologicalModelingApp(QMainWindow):
         )
 
         self.trainer.progress.connect(self.log)
+        self.trainer.progress_percent.connect(self._on_training_progress)
         self.trainer.finished.connect(self.on_traditional_trained)
         self.trainer.error.connect(self.on_error)
 
+        # 显示进度对话框
+        self.progress_dialog.show()
         self.trainer.start()
 
     def on_traditional_trained(self, predictor, metrics):
@@ -1196,6 +1223,12 @@ class GeologicalModelingApp(QMainWindow):
         self.set_busy_state(False)
         self.model_btn.setEnabled(True)
         self.progress_bar.setVisible(False)
+
+        # 关闭进度对话框
+        if hasattr(self, 'progress_dialog') and self.progress_dialog:
+            self.progress_dialog.set_progress(100)
+            self.progress_dialog.set_message("✓ 训练完成!")
+            self.progress_dialog.auto_close_on_complete()
 
         stats = f"""
 ✓ 传统方法拟合完成
@@ -1252,6 +1285,16 @@ class GeologicalModelingApp(QMainWindow):
                 'heads': 4
             }
 
+        # 创建进度对话框
+        self.progress_dialog = ModernProgressDialog(
+            self,
+            "GNN模型训练",
+            "正在初始化神经网络模型..."
+        )
+        self.progress_dialog.set_indeterminate(False)
+        self.progress_dialog.set_progress(0)
+        self.progress_dialog.set_detail(f"训练轮数: 0/{config['epochs']}")
+
         self.set_busy_state(True)
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, config['epochs'])
@@ -1262,9 +1305,12 @@ class GeologicalModelingApp(QMainWindow):
         )
 
         self.trainer.progress.connect(self.log)
+        self.trainer.progress_percent.connect(self._on_training_progress)
         self.trainer.finished.connect(self.on_gnn_trained)
         self.trainer.error.connect(self.on_error)
 
+        # 显示进度对话框
+        self.progress_dialog.show()
         self.trainer.start()
 
     def on_gnn_trained(self, model, history):
@@ -1276,6 +1322,12 @@ class GeologicalModelingApp(QMainWindow):
         self.set_busy_state(False)
         self.model_btn.setEnabled(True)
         self.progress_bar.setVisible(False)
+
+        # 关闭进度对话框
+        if hasattr(self, 'progress_dialog') and self.progress_dialog:
+            self.progress_dialog.set_progress(100)
+            self.progress_dialog.set_message("✓ 训练完成!")
+            self.progress_dialog.auto_close_on_complete()
 
         if 'test_metrics' in history:
             metrics = history['test_metrics']
@@ -1315,6 +1367,16 @@ class GeologicalModelingApp(QMainWindow):
         self.log("\n" + "="*50)
         self.log("开始构建三维模型...")
 
+        # 创建进度对话框
+        self.progress_dialog = ModernProgressDialog(
+            self,
+            "三维建模",
+            "正在初始化建模参数..."
+        )
+        self.progress_dialog.set_indeterminate(False)
+        self.progress_dialog.set_progress(0)
+        self.progress_dialog.set_detail(f"分辨率: {resolution} × {resolution}")
+
         self.set_busy_state(True)
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, 0)
@@ -1329,9 +1391,12 @@ class GeologicalModelingApp(QMainWindow):
         )
 
         self.modeler.progress.connect(self.log)
+        self.modeler.progress_percent.connect(self._on_modeling_progress)
         self.modeler.finished.connect(self.on_model_built)
         self.modeler.error.connect(self.on_error)
 
+        # 显示进度对话框
+        self.progress_dialog.show()
         self.modeler.start()
 
     def on_resolution_changed(self, value):
@@ -1643,7 +1708,7 @@ class GeologicalModelingApp(QMainWindow):
         self.XI = XI
         self.YI = YI
         self.last_base_level = self.base_level_spin.value()
-        
+
         # 清空渲染缓存
         self.cached_meshes = {}
         self.cached_textures = {}
@@ -1653,6 +1718,12 @@ class GeologicalModelingApp(QMainWindow):
 
         self.set_busy_state(False)
         self.progress_bar.setVisible(False)
+
+        # 关闭进度对话框
+        if hasattr(self, 'progress_dialog') and self.progress_dialog:
+            self.progress_dialog.set_progress(100)
+            self.progress_dialog.set_message("✓ 建模完成!")
+            self.progress_dialog.auto_close_on_complete()
 
         stats = "✓ 三维模型构建完成\n\n各层统计:\n"
         for bm in block_models:
@@ -2626,6 +2697,10 @@ class GeologicalModelingApp(QMainWindow):
                 file_path, _ = QFileDialog.getSaveFileName(
                     self, "保存FLAC3D网格", "geological_model.f3grid", "FLAC3D Grid Files (*.f3grid)"
                 )
+            elif format_idx == 1:  # FPN
+                file_path, _ = QFileDialog.getSaveFileName(
+                    self, "保存FPN网格", "geological_model.fpn", "Midas GTS NX FPN Files (*.fpn)"
+                )
             else:  # f3dat 脚本
                 file_path, _ = QFileDialog.getSaveFileName(
                     self, "保存FLAC3D脚本", "geological_model.f3dat", "FLAC3D Files (*.f3dat)"
@@ -2740,12 +2815,12 @@ class GeologicalModelingApp(QMainWindow):
                         return
 
                 # 选择导出器格式
-                # 0: f3grid (推荐), 1: 紧凑脚本, 2: 完整脚本
+                # 0: f3grid (推荐), 1: FPN (中间格式), 2: 紧凑脚本, 3: 完整脚本
                 format_idx = 0
                 if hasattr(self, 'flac3d_format_combo'):
                     format_idx = self.flac3d_format_combo.currentIndex()
 
-                format_names = ['f3grid', '紧凑脚本', '完整脚本']
+                format_names = ['f3grid', 'FPN', '紧凑脚本', '完整脚本']
                 # 创建导出器并导出
                 self.log(f"导出 {len(layers_data)} 个地层到FLAC3D...")
                 self.log(f"降采样因子: {downsample}x (网格减少 {100*(1-1/(downsample*downsample)):.0f}%)")
@@ -2756,11 +2831,99 @@ class GeologicalModelingApp(QMainWindow):
                         QMessageBox.warning(self, "警告", "F3Grid导出器不可用!\n请检查 src/exporters/f3grid_exporter_v2.py")
                         return
 
+                    # 识别所有煤层
+                    coal_layer_indices = []
+                    coal_layer_names = []
+                    for i, layer_dict in enumerate(layers_data):
+                        name = layer_dict['name']
+                        if '煤' in name or 'coal' in name.lower():
+                            coal_layer_indices.append(i)
+                            coal_layer_names.append(f"[{i}] {name}")
+
+                    # 如果有多个煤层，让用户选择
+                    selected_coal_indices = None
+                    if len(coal_layer_indices) > 3:  # 超过3个煤层才询问
+                        dialog = QDialog(self)
+                        dialog.setWindowTitle("选择高密度煤层")
+                        dialog.setMinimumWidth(500)
+                        layout = QVBoxLayout(dialog)
+
+                        # 说明文字
+                        label = QLabel(
+                            f"识别到 {len(coal_layer_indices)} 个煤层。\n\n"
+                            f"为了优化性能，请选择需要使用高密度网格的煤层。\n"
+                            f"未选中的煤层将使用常规降采样率（{downsample}x）。\n"
+                            f"选中的煤层及其上下2层将使用原始密度（1x）。"
+                        )
+                        label.setWordWrap(True)
+                        layout.addWidget(label)
+
+                        # 煤层列表（多选）
+                        list_widget = QListWidget()
+                        list_widget.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
+                        for name in coal_layer_names:
+                            list_widget.addItem(name)
+                        # 默认全选
+                        for i in range(list_widget.count()):
+                            list_widget.item(i).setSelected(True)
+                        layout.addWidget(list_widget)
+
+                        # 全选/全不选按钮
+                        btn_layout = QHBoxLayout()
+                        select_all_btn = QPushButton("全选")
+                        select_none_btn = QPushButton("全不选")
+                        select_all_btn.clicked.connect(lambda: list_widget.selectAll())
+                        select_none_btn.clicked.connect(lambda: list_widget.clearSelection())
+                        btn_layout.addWidget(select_all_btn)
+                        btn_layout.addWidget(select_none_btn)
+                        btn_layout.addStretch()
+                        layout.addLayout(btn_layout)
+
+                        # 确认/取消按钮
+                        button_box = QDialogButtonBox(
+                            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+                        )
+                        button_box.accepted.connect(dialog.accept)
+                        button_box.rejected.connect(dialog.reject)
+                        layout.addWidget(button_box)
+
+                        if dialog.exec() == QDialog.DialogCode.Accepted:
+                            # 获取选中的煤层索引
+                            selected_items = list_widget.selectedItems()
+                            if selected_items:
+                                selected_coal_indices = []
+                                for item in selected_items:
+                                    # 从 "[index] name" 格式中提取index
+                                    text = item.text()
+                                    idx = int(text.split(']')[0][1:])
+                                    selected_coal_indices.append(idx)
+                                    self.log(f"  选中煤层: [{idx}] {text.split(']')[1].strip()}")
+                                self.log(f"用户选择 {len(selected_coal_indices)} 个煤层使用高密度网格: {selected_coal_indices}")
+                            else:
+                                self.log("未选择任何煤层，所有地层使用统一降采样")
+                                selected_coal_indices = []  # 空列表表示没有高密度煤层
+                        else:
+                            self.log("取消导出")
+                            return
+                    else:
+                        # 煤层数量少，使用所有煤层
+                        if coal_layer_indices:
+                            self.log(f"煤层数量 ≤ 3，自动对所有煤层使用高密度网格")
+
                     exporter = F3GridExporterV2()
+
+                    # 获取接触面选项
+                    create_interfaces = self.create_interfaces_checkbox.isChecked() if hasattr(self, 'create_interfaces_checkbox') else False
+
                     export_options = {
                         'downsample_factor': downsample,
+                        'coal_downsample_factor': 1,  # 煤层区域使用1x（原始密度）
+                        'coal_adjacent_layers': 2,  # 煤层上下各2层使用高密度
+                        'selected_coal_layers': selected_coal_indices,  # 用户选择的煤层
                         'min_zone_thickness': 0.001,
-                        'coord_precision': 6
+                        'coord_precision': 6,
+                        'check_overlap': True,
+                        'create_interfaces': create_interfaces  # 接触面模式
                     }
 
                     exporter.export(
@@ -2775,10 +2938,120 @@ class GeologicalModelingApp(QMainWindow):
                     self.log(f"  总单元数: {exporter.stats.total_zones}")
                     if exporter.stats.min_thickness < float('inf'):
                         self.log(f"  厚度范围: {exporter.stats.min_thickness:.3f}m - {exporter.stats.max_thickness:.3f}m")
+                    ox, oy, oz = exporter.stats.origin_offset
+                    if ox != 0 or oy != 0 or oz != 0:
+                        self.log(f"  坐标系统: 相对坐标")
+                        self.log(f"  原点偏移: X={ox:.2f}m, Y={oy:.2f}m, Z={oz:.2f}m")
                     self.log(f"\n在FLAC3D中导入:")
                     self.log(f'  zone import f3grid "{os.path.basename(file_path)}"')
 
-                elif format_idx == 1:  # 紧凑脚本
+                elif format_idx == 1:  # FPN 格式
+                    if not FPN_EXPORTER_AVAILABLE:
+                        QMessageBox.warning(self, "警告", "FPN导出器不可用!\n请检查 src/exporters/fpn_exporter.py")
+                        return
+
+                    # FPN 格式也支持煤层选择
+                    coal_layer_indices = []
+                    coal_layer_names = []
+                    for i, layer_dict in enumerate(layers_data):
+                        name = layer_dict['name']
+                        if '煤' in name or 'coal' in name.lower():
+                            coal_layer_indices.append(i)
+                            coal_layer_names.append(f"[{i}] {name}")
+
+                    # 如果有多个煤层，让用户选择（与f3grid相同逻辑）
+                    selected_coal_indices = None
+                    if len(coal_layer_indices) > 3:  # 超过3个煤层才询问
+                        dialog = QDialog(self)
+                        dialog.setWindowTitle("选择高密度煤层")
+                        dialog.setMinimumWidth(500)
+                        layout = QVBoxLayout(dialog)
+
+                        # 说明文字
+                        label = QLabel(
+                            f"识别到 {len(coal_layer_indices)} 个煤层。\n\n"
+                            f"为了优化性能，请选择需要使用高密度网格的煤层。\n"
+                            f"未选中的煤层将使用常规降采样率（{downsample}x）。\n"
+                            f"选中的煤层及其上下2层将使用原始密度（1x）。"
+                        )
+                        label.setWordWrap(True)
+                        layout.addWidget(label)
+
+                        # 煤层列表（多选）
+                        list_widget = QListWidget()
+                        list_widget.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
+                        for name in coal_layer_names:
+                            list_widget.addItem(name)
+                        # 默认全选
+                        for i in range(list_widget.count()):
+                            list_widget.item(i).setSelected(True)
+                        layout.addWidget(list_widget)
+
+                        # 全选/全不选按钮
+                        btn_layout = QHBoxLayout()
+                        select_all_btn = QPushButton("全选")
+                        select_none_btn = QPushButton("全不选")
+                        select_all_btn.clicked.connect(lambda: list_widget.selectAll())
+                        select_none_btn.clicked.connect(lambda: list_widget.clearSelection())
+                        btn_layout.addWidget(select_all_btn)
+                        btn_layout.addWidget(select_none_btn)
+                        btn_layout.addStretch()
+                        layout.addLayout(btn_layout)
+
+                        # 确认/取消按钮
+                        button_box = QDialogButtonBox(
+                            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+                        )
+                        button_box.accepted.connect(dialog.accept)
+                        button_box.rejected.connect(dialog.reject)
+                        layout.addWidget(button_box)
+
+                        if dialog.exec() == QDialog.DialogCode.Accepted:
+                            # 获取选中的煤层索引
+                            selected_items = list_widget.selectedItems()
+                            if selected_items:
+                                selected_coal_indices = []
+                                for item in selected_items:
+                                    # 从 "[index] name" 格式中提取index
+                                    text = item.text()
+                                    idx = int(text.split(']')[0][1:])
+                                    selected_coal_indices.append(idx)
+                                    self.log(f"  选中煤层: [{idx}] {text.split(']')[1].strip()}")
+                                self.log(f"用户选择 {len(selected_coal_indices)} 个煤层使用高密度网格: {selected_coal_indices}")
+                            else:
+                                self.log("未选择任何煤层，所有地层使用统一降采样")
+                                selected_coal_indices = []  # 空列表表示没有高密度煤层
+                        else:
+                            self.log("取消导出")
+                            return
+                    else:
+                        # 煤层数量少，使用所有煤层
+                        if coal_layer_indices:
+                            self.log(f"煤层数量 ≤ 3，自动对所有煤层使用高密度网格")
+
+                    exporter = FPNExporter()
+
+                    # 获取接触面选项
+                    create_interfaces = self.create_interfaces_checkbox.isChecked() if hasattr(self, 'create_interfaces_checkbox') else False
+
+                    export_options = {
+                        'downsample_factor': downsample,
+                        'coal_downsample_factor': 1,
+                        'coal_adjacent_layers': 2,
+                        'selected_coal_layers': selected_coal_indices,
+                        'create_interfaces': create_interfaces  # 接触面模式
+                    }
+
+                    exporter.export(
+                        data={'layers': layers_data},
+                        output_path=file_path,
+                        options=export_options
+                    )
+
+                    self.log(f"✓ FPN导出成功!")
+                    self.log(f"提示: FPN文件可使用Midas转换工具转换为FLAC3D f3grid格式")
+
+                elif format_idx == 2:  # 紧凑脚本
                     exporter = CompactFLAC3DExporter()
                     export_options = {
                         'downsample_factor': downsample,
@@ -2847,7 +3120,37 @@ class GeologicalModelingApp(QMainWindow):
         self.model_btn.setEnabled(True if self.predictor else False)
         self.progress_bar.setVisible(False)
 
+        # 关闭进度对话框
+        if hasattr(self, 'progress_dialog') and self.progress_dialog:
+            self.progress_dialog.set_message("✗ 错误")
+            self.progress_dialog.set_detail(message[:100])  # 显示前100个字符
+            self.progress_dialog.auto_close_on_complete()
+
         QMessageBox.critical(self, "错误", message)
+
+    def _on_training_progress(self, percent: int):
+        """训练进度更新回调"""
+        if hasattr(self, 'progress_dialog') and self.progress_dialog:
+            self.progress_dialog.set_progress(percent)
+            # 可以根据阶段更新消息
+            if percent < 30:
+                self.progress_dialog.set_message("正在拟合模型...")
+            elif percent < 80:
+                self.progress_dialog.set_message("正在评估性能...")
+            else:
+                self.progress_dialog.set_message("正在完成训练...")
+
+    def _on_modeling_progress(self, percent: int):
+        """建模进度更新回调"""
+        if hasattr(self, 'progress_dialog') and self.progress_dialog:
+            self.progress_dialog.set_progress(percent)
+            # 根据进度更新消息
+            if percent < 20:
+                self.progress_dialog.set_message("正在生成网格...")
+            elif percent < 60:
+                self.progress_dialog.set_message("正在预测厚度...")
+            else:
+                self.progress_dialog.set_message("正在构建三维模型...")
 
 
 def main():
