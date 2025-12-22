@@ -71,35 +71,32 @@ def check_hex_geometry(coords: np.ndarray, tolerance: float = 1e-9) -> Tuple[boo
     """
     检查六面体（B8）几何是否有效
 
-    使用四面体分解法检查六面体是否发生翻转或扭曲。
-    采用标准的 5 四面体分解方案。
+    使用简化的厚度检查：验证顶面在底面之上，每个角点厚度为正。
+    这比四面体分解更宽松，避免过度过滤有效单元。
 
     Args:
         coords: 8x3 数组，B8 单元的 8 个节点坐标（按 FLAC3D 标准顺序）
-        tolerance: 体积容差（默认 1e-9）
+        tolerance: 厚度容差（默认 1e-9）
 
     Returns:
-        (is_valid, min_tet_volume): 是否有效，最小四面体体积
+        (is_valid, min_thickness): 是否有效，最小厚度
     """
-    # B8 单元的标准 5 四面体分解（节点索引）
-    # 这是一种常用的分解方案，保证覆盖整个六面体
-    tets = [
-        (0, 1, 3, 4),  # SW_bot, SE_bot, NW_bot, SW_top
-        (1, 2, 3, 6),  # SE_bot, NE_bot, NW_bot, NE_top
-        (1, 3, 4, 6),  # SE_bot, NW_bot, SW_top, NE_top
-        (1, 4, 5, 6),  # SE_bot, SW_top, SE_top, NE_top
-        (3, 4, 6, 7),  # NW_bot, SW_top, NE_top, NW_top
-    ]
+    # FLAC3D B8 节点顺序 (0-indexed):
+    # 0=SW_bot, 1=SE_bot, 2=NW_bot, 3=SW_top, 4=NE_bot, 5=NW_top, 6=SE_top, 7=NE_top
+    # 底面节点: 0, 1, 2, 4 (z值较小)
+    # 顶面节点: 3, 5, 6, 7 (z值较大)
+    # 对应关系: 0<->3(SW), 1<->6(SE), 2<->5(NW), 4<->7(NE)
 
-    volumes = []
-    for i, j, k, l in tets:
-        vol = tet_volume(coords[i], coords[j], coords[k], coords[l])
-        volumes.append(vol)
+    # 检查每个角点的厚度（顶面z - 底面z）
+    thickness_sw = coords[3, 2] - coords[0, 2]  # SW: top(3) - bottom(0)
+    thickness_se = coords[6, 2] - coords[1, 2]  # SE: top(6) - bottom(1)
+    thickness_nw = coords[5, 2] - coords[2, 2]  # NW: top(5) - bottom(2)
+    thickness_ne = coords[7, 2] - coords[4, 2]  # NE: top(7) - bottom(4)
 
-    min_vol = min(volumes)
-    is_valid = min_vol > tolerance
+    min_thickness = min(thickness_sw, thickness_se, thickness_nw, thickness_ne)
+    is_valid = min_thickness > tolerance
 
-    return is_valid, min_vol
+    return is_valid, min_thickness
 
 
 @dataclass
@@ -131,6 +128,12 @@ class ExportStats:
     max_thickness: float = 0.0
     file_size_kb: float = 0.0
     origin_offset: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+    # 坐标范围（原始坐标）
+    coord_range_x: Tuple[float, float] = (0.0, 0.0)
+    coord_range_y: Tuple[float, float] = (0.0, 0.0)
+    coord_range_z: Tuple[float, float] = (0.0, 0.0)
+    # 模型尺寸
+    model_size: Tuple[float, float, float] = (0.0, 0.0, 0.0)
 
 
 class F3GridExporterV2:
@@ -933,11 +936,24 @@ class F3GridExporterV2:
 
         print(f"\n--- 转换为相对坐标 ---")
 
-        # 找到最小坐标值
+        # 找到坐标范围
         min_x = min(gp.x for gp in self.gridpoints)
         min_y = min(gp.y for gp in self.gridpoints)
         min_z = min(gp.z for gp in self.gridpoints)
+        max_x_orig = max(gp.x for gp in self.gridpoints)
+        max_y_orig = max(gp.y for gp in self.gridpoints)
+        max_z_orig = max(gp.z for gp in self.gridpoints)
 
+        # 记录原始坐标范围
+        self.stats.coord_range_x = (min_x, max_x_orig)
+        self.stats.coord_range_y = (min_y, max_y_orig)
+        self.stats.coord_range_z = (min_z, max_z_orig)
+        self.stats.model_size = (max_x_orig - min_x, max_y_orig - min_y, max_z_orig - min_z)
+
+        print(f"  原始坐标范围:")
+        print(f"    X: [{min_x:.2f}, {max_x_orig:.2f}] (尺寸: {max_x_orig - min_x:.2f}m)")
+        print(f"    Y: [{min_y:.2f}, {max_y_orig:.2f}] (尺寸: {max_y_orig - min_y:.2f}m)")
+        print(f"    Z: [{min_z:.2f}, {max_z_orig:.2f}] (尺寸: {max_z_orig - min_z:.2f}m)")
         print(f"  原点偏移: X={min_x:.2f}, Y={min_y:.2f}, Z={min_z:.2f}")
 
         # 记录偏移量（用于后续坐标还原）

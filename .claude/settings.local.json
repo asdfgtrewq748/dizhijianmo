@@ -103,7 +103,8 @@
       "Bash(python -m py_compile src/exporters/f3grid_exporter_v2.py)",
       "Bash(python test_f3grid_export.py)",
       "Bash(ls -lh test_*.f3grid)",
-      "Bash(python -c \"import sys; sys.stdout.reconfigure\\(encoding=''utf-8''\\); exec\\(open\\(''test_f3grid_export.py'', encoding=''utf-8''\\).read\\(\\)\\)\")"
+      "Bash(python -c \"import sys; sys.stdout.reconfigure\\(encoding=''utf-8''\\); exec\\(open\\(''test_f3grid_export.py'', encoding=''utf-8''\\).read\\(\\)\\)\")",
+      "Bash(cat \"D:/xiangmu/dizhijianmo/src/exporters/f3grid_exporter_v2.py\")"
     ]
   }
 }

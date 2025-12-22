@@ -706,7 +706,7 @@ class GeologicalModelingApp(QMainWindow):
         render_layout.addWidget(self.show_sides_cb)
 
         self.show_edges_cb = QCheckBox("显示网格")
-        self.show_edges_cb.setChecked(False)
+        self.show_edges_cb.setChecked(True)  # 默认显示网格
         self.show_edges_cb.stateChanged.connect(self.on_edges_toggled)
         render_layout.addWidget(self.show_edges_cb)
 
@@ -2938,6 +2938,16 @@ class GeologicalModelingApp(QMainWindow):
                     self.log(f"  总单元数: {exporter.stats.total_zones}")
                     if exporter.stats.min_thickness < float('inf'):
                         self.log(f"  厚度范围: {exporter.stats.min_thickness:.3f}m - {exporter.stats.max_thickness:.3f}m")
+                    # 显示坐标范围
+                    x_min, x_max = exporter.stats.coord_range_x
+                    y_min, y_max = exporter.stats.coord_range_y
+                    z_min, z_max = exporter.stats.coord_range_z
+                    sx, sy, sz = exporter.stats.model_size
+                    if sx > 0 or sy > 0 or sz > 0:
+                        self.log(f"  原始坐标范围:")
+                        self.log(f"    X: [{x_min:.2f}, {x_max:.2f}] (尺寸: {sx:.2f}m)")
+                        self.log(f"    Y: [{y_min:.2f}, {y_max:.2f}] (尺寸: {sy:.2f}m)")
+                        self.log(f"    Z: [{z_min:.2f}, {z_max:.2f}] (尺寸: {sz:.2f}m)")
                     ox, oy, oz = exporter.stats.origin_offset
                     if ox != 0 or oy != 0 or oz != 0:
                         self.log(f"  坐标系统: 相对坐标")

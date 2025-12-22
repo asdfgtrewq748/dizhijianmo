@@ -1,0 +1,63 @@
+model new
+zone import "D:/xiangmu/dizhijianmo/FLAC/geological_model.f3grid"
+zone attach by-face
+
+model save 'moxing.sav'
+
+
+model rest 'moxing.sav'
+zone cmodel assign mohr-coulomb
+
+
+zone	property	bulk	1.25E+09	shear	0.71E+09	cohesion	3.9E+06	friction	26	    tension	1.8E+06  density 1380	range 	group 'coal'
+;zone	property	bulk	1.25E+09	shear	0.71E+09	cohesion	3.96E+06 friction	26	    tension	1.8E+06	 density 1380   range	group '6mei'
+;zone	property	bulk	1.25E+09	shear	0.71E+09	cohesion	3.96E+06 friction	26	    tension	1.8E+06  density 1380	range	group '7mei'
+;zone	property	bulk	1.25E+09	shear	0.71E+09	cohesion	3.96E+06 friction	26  	tension	1.8E+06  density 1380	range	group '8mei'
+;zone	property	bulk	1.25E+09	shear	0.71E+09	cohesion	3.96E+06 friction	26  	tension	1.8E+06  density 1380	range	group '9mei'
+;zone	property	bulk	1.25E+09	shear	0.71E+09	cohesion	3.96E+06 friction	26  	tension	1.8E+06  density 1380	range	group '11mei'
+;zone	property	bulk	1.25E+09	shear	0.71E+09	cohesion	3.96E+06 friction	26  	tension	1.8E+06  density 1380	range	group '12mei'
+zone	property	bulk	6.07E+09	shear	5.68E+09	cohesion	6.5E+06	friction	33  	tension	1.6E+06  density 2700	range	group 'sandstone'
+;zone	property	bulk	6.07E+09	shear	5.68E+09	cohesion	6.5E+06	friction	33  	tension	1.6E+06  density 2700	range	group 'fenshayan2'
+
+;zone	property	bulk	5.33E+09	shear	4.20E+09	cohesion	10.26E+06	friction	33  	tension	2.1E+06  density 2700	range	group 'zhongshayan1'
+;zone	property	bulk	5.33E+09	shear	4.20E+09	cohesion	10.26E+06	friction	33  	tension	2.1E+06  density 2700	range	group 'zhongshayan2'
+zone	property	bulk	5.33E+09	shear	4.20E+09	cohesion	10.26E+06	friction	33  	tension	2.1E+06  density 2700	range	group 'carbonaceous_mudstone'
+
+zone	property	bulk	4.36E+09	shear	3E+09	cohesion	2.2E+06	friction	35	    tension	1.3E+06  density 2640	range	group 'mudstone'
+;zone	property	bulk    4.36E+09	shear	3E+09	cohesion	2.2E+06	friction	35	    tension	1.3E+06  density 2640	range	group 'niyan2'
+;zone	property	bulk	4.36E+09	shear	3E+09	cohesion	2.2E+06	friction	35	    tension	1.3E+06  density 2640	range	group 'niyan3'
+;zone	property	bulk	7.29E+09	shear	6.84E+09	cohesion	6.1E+06	friction	26	    tension	2.5E+06  density 2700	range	group 'xishayan'
+
+;zone	property	bulk	5.33E+09	shear	4.20E+09	cohesion	6.3E+06	friction	33  	tension	3.1E+06  density 2700	range	group 'xizhongshayan1'
+;zone	property	bulk	5.33E+09	shear	4.20E+09	cohesion	6.3E+06	friction	33  	tension	3.1E+06  density 2700	range	group 'xizhongshayan2'
+;zone	property	bulk	5.33E+09	shear	4.20E+09	cohesion	6.3E+06	friction	33  	tension	3.1E+06  density 2700	range	group 'xizhongshayan3'
+;zone	property	bulk	5.33E+09	shear	4.20E+09	cohesion	6.3E+06	friction	33  	tension	3.1E+06  density 2700	range	group 'xizhongshayan4'
+zone	property	bulk	5.33E+09	shear	4.20E+09	cohesion	6.3E+06	friction	33  	tension	3.1E+06  density 2700	range	group 'group'
+zone	property	bulk	9.24E+09	shear	5.02E+09	cohesion	3.5E+06	friction	33  	tension	2.43E+06	 density 2610   range	group 'sandy_mudstone'
+;
+;zone	property	bulk	6.07E+09	shear	5.68E+09	cohesion	6.5E+06	friction	33  	tension	3.1E+06  density 2700	range	group 'diban'
+;zone	property	bulk	7.29E+09	shear	6.84E+09	cohesion	6.3E+06	friction	33  	tension	3.1E+06  density 2700	range	group 'dingban'
+
+
+
+
+
+
+zone gridpoint fix velocity-x range position-x -0.1 0.1
+zone gridpoint fix velocity-x range position-x 3549.9  3550.1
+zone gridpoint fix velocity-y range position-y -0.1 0.1
+zone gridpoint fix velocity-y range position-y  2024.9 2025.1
+zone gridpoint fix velocity-z range position-z -0.1 0.1
+
+;zone face apply stress-normal -22.4e6 range position-z 622
+
+model gravity 0 0 -9.8
+;zone initialize-stress overburden -22.4e6
+;zone initialize stress-xx -15e6 grad (0,0,[25000])
+;zone initialize stress-yy -15e6 grad (0,0,[25000])
+;zone initialize stress-zz -12.5e6 grad (0,0,[25000])
+
+
+model solve
+model save 'moxingpingheng.sav'
+
