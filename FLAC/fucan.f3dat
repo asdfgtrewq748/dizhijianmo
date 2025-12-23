@@ -6,6 +6,7 @@ model save 'moxing.sav'
 
 
 model rest 'moxing.sav'
+zone delete range id 195
 zone cmodel assign mohr-coulomb
 
 
@@ -44,9 +45,10 @@ zone	property	bulk	9.24E+09	shear	5.02E+09	cohesion	3.5E+06	friction	33  	tensio
 
 
 zone gridpoint fix velocity-x range position-x -0.1 0.1
-zone gridpoint fix velocity-x range position-x 3549.9  3550.1
+zone gridpoint fix velocity-x range position-x 3558.7 3558.9
 zone gridpoint fix velocity-y range position-y -0.1 0.1
-zone gridpoint fix velocity-y range position-y  2024.9 2025.1
+zone gridpoint fix velocity-y range position-y 2033.4 2033.6
+
 zone gridpoint fix velocity-z range position-z -0.1 0.1
 
 ;zone face apply stress-normal -22.4e6 range position-z 622

@@ -274,7 +274,7 @@ class F3GridExporterV2:
         else:
             # 自适应降采样模式：煤层使用不同降采样率
             print(f"降采样: 常规地层 {downsample}x, 煤层区域 {coal_downsample}x")
-            print(f"  ⚠️  警告: 层间不同分辨率可能导致非共形、缝隙或重叠")
+            print(f"  [警告] 层间不同分辨率可能导致非共形、缝隙或重叠")
         print(f"煤层相邻层范围: ±{coal_adjacent} 层")
         print(f"接触面模式: {'启用 (层间不共享节点)' if create_interfaces else '禁用 (层间共享节点)'}")
         print(f"输出文件: {output_path}")
@@ -303,6 +303,9 @@ class F3GridExporterV2:
             self.stats.file_size_kb = os.path.getsize(output_path) / 1024
         except:
             pass
+
+        # 6. 写入模型信息文件
+        self._write_model_info(output_path, layers, layer_names)
 
         # 打印统计
         self._print_stats()
@@ -428,17 +431,17 @@ class F3GridExporterV2:
 
                 layer_names = [layers[k].get('name', f'L{k}') for k in merge_group]
                 total_thickness = sum(layer_thicknesses[k] for k in merge_group)
-                print(f"  ✓ 合并 {len(merge_group)} 层: {' + '.join(layer_names)} → 总厚度 {total_thickness:.3f}m")
+                print(f"  [OK] 合并 {len(merge_group)} 层: {' + '.join(layer_names)} -> 总厚度 {total_thickness:.3f}m")
                 merge_count += len(merge_group) - 1
 
                 i = j  # 跳到下一组
             else:
                 # 单层，但太薄 - 仍然保留（避免空洞）
                 merged_layers.append(current_layer.copy())
-                print(f"  ⚠ 薄层 {current_name} ({current_thickness:.3f}m) 无法合并，保留")
+                print(f"  [注意] 薄层 {current_name} ({current_thickness:.3f}m) 无法合并，保留")
                 i += 1
 
-        print(f"  合并统计: 原始 {len(layers)} 层 → 合并后 {len(merged_layers)} 层（减少 {merge_count} 层）")
+        print(f"  合并统计: 原始 {len(layers)} 层 -> 合并后 {len(merged_layers)} 层（减少 {merge_count} 层）")
 
         return merged_layers
 
@@ -651,7 +654,9 @@ class F3GridExporterV2:
 
         for layer_idx, layer in enumerate(layers):
             layer_name = layer.get('name', f'Layer_{layer_idx}')
-            safe_name = self._sanitize_name(layer_name)
+            # 判断是否为煤层，煤层保留编号
+            is_coal = '煤' in layer_name or 'coal' in layer_name.lower()
+            safe_name = self._sanitize_name(layer_name, keep_coal_id=is_coal)
             layer_names.append(safe_name)  # 记录层名
 
             # 根据是否在高密度区域选择降采样率
@@ -917,7 +922,7 @@ class F3GridExporterV2:
 
                     if overlap_count > 0:
                         max_overlap = np.max(prev_top_z[overlap_mask] - bottom_z[overlap_mask])
-                        print(f"    ⚠️  检测到 {overlap_count} 处层间重叠，最大重叠 {max_overlap:.3f}m")
+                        print(f"    [警告] 检测到 {overlap_count} 处层间重叠，最大重叠 {max_overlap:.3f}m")
 
         # 更新统计
         self.stats.total_gridpoints = len(self.gridpoints)
@@ -1079,11 +1084,19 @@ class F3GridExporterV2:
 
         print(f"  写入完成: {output_path}")
 
-    def _sanitize_name(self, name: str) -> str:
-        """将名称转换为 FLAC3D 兼容的 ASCII 形式，同岩性合并到同一组"""
+    def _sanitize_name(self, name: str, keep_coal_id: bool = False) -> str:
+        """
+        将名称转换为 FLAC3D 兼容的 ASCII 形式
+
+        Args:
+            name: 原始名称
+            keep_coal_id: 如果为 True 且是煤层，保留煤层编号（如 "16-3煤" -> "coal_16_3"）
+
+        Returns:
+            FLAC3D 兼容的 ASCII 名称
+        """
         # 中文到英文的映射
         replacements = {
-            '煤': 'coal',
             '砂质泥岩': 'sandy_mudstone',
             '炭质泥岩': 'carbonaceous_mudstone',
             '高岭质泥岩': 'kaolinite_mudstone',
@@ -1100,23 +1113,58 @@ class F3GridExporterV2:
 
         result = name or 'group'
 
-        # 先去掉名称中的数字序号（如 "砂岩_25" -> "砂岩", "16-4煤" -> "煤"）
-        # 去掉开头的数字和分隔符（如 "16-4煤" -> "煤", "16_3_煤" -> "煤"）
-        result = re.sub(r'^[\d_\-\.]+', '', result)
-        # 去掉末尾的数字和分隔符（如 "砂岩_25" -> "砂岩", "泥岩-3" -> "泥岩"）
-        result = re.sub(r'[\d_\-\.]+$', '', result)
+        # 检查是否是煤层
+        is_coal = '煤' in result or 'coal' in result.lower()
 
-        # 中文转英文
-        for cn, en in replacements.items():
-            result = result.replace(cn, en)
+        if is_coal and keep_coal_id:
+            # 煤层：保留编号，转换为 coal_编号 格式
+            # 例如: "16-3煤" -> "coal_16_3", "3煤" -> "coal_3"
 
-        # 替换非法字符
-        result = re.sub(r'[^0-9A-Za-z_]', '_', result)
-        result = result.strip('_')
+            # 提取煤层编号（煤字之前的数字和分隔符）
+            coal_match = re.match(r'^([\d_\-\.]+)?煤(.*)$', result)
+            if coal_match:
+                coal_id = coal_match.group(1) or ''
+                suffix = coal_match.group(2) or ''
 
-        # 再次清理可能残留的数字后缀（英文转换后可能还有，如 "sandstone_25"）
-        result = re.sub(r'_*\d+$', '', result)
-        result = result.strip('_')
+                # 清理编号中的分隔符
+                coal_id = re.sub(r'[\-\.]', '_', coal_id).strip('_')
+
+                if coal_id:
+                    result = f"coal_{coal_id}"
+                else:
+                    result = "coal"
+
+                # 如果有后缀（如 "上分层"），也加上
+                if suffix:
+                    suffix_clean = re.sub(r'[^0-9A-Za-z_]', '_', suffix).strip('_')
+                    if suffix_clean:
+                        result = f"{result}_{suffix_clean}"
+            else:
+                # 英文 coal 的情况，或者其他格式
+                # 替换非法字符，但保留数字
+                result = result.replace('煤', 'coal')
+                result = re.sub(r'[^0-9A-Za-z_]', '_', result)
+                result = result.strip('_')
+        else:
+            # 非煤层或不保留编号：合并同岩性
+            # 先去掉名称中的数字序号（如 "砂岩_25" -> "砂岩", "16-4煤" -> "煤"）
+            # 去掉开头的数字和分隔符（如 "16-4煤" -> "煤", "16_3_煤" -> "煤"）
+            result = re.sub(r'^[\d_\-\.]+', '', result)
+            # 去掉末尾的数字和分隔符（如 "砂岩_25" -> "砂岩", "泥岩-3" -> "泥岩"）
+            result = re.sub(r'[\d_\-\.]+$', '', result)
+
+            # 中文转英文（煤放最后处理）
+            for cn, en in replacements.items():
+                result = result.replace(cn, en)
+            result = result.replace('煤', 'coal')
+
+            # 替换非法字符
+            result = re.sub(r'[^0-9A-Za-z_]', '_', result)
+            result = result.strip('_')
+
+            # 再次清理可能残留的数字后缀（英文转换后可能还有，如 "sandstone_25"）
+            result = re.sub(r'_*\d+$', '', result)
+            result = result.strip('_')
 
         return result if result else 'group'
 
@@ -1225,6 +1273,348 @@ class F3GridExporterV2:
         print(f"\n分组详情:")
         for name, zone_ids in self.groups.items():
             print(f"  {name}: {len(zone_ids):,} 单元")
+
+    def _write_model_info(self, output_path: str, layers: List[Dict], layer_names: List[str]):
+        """
+        写入模型信息文件 (.txt)
+
+        包含：
+        - 模型边界范围（原始坐标）
+        - 模型尺寸
+        - 各层信息（名称、厚度、单元数等）
+        - 完整的FLAC3D赋参代码
+
+        Args:
+            output_path: 输出文件路径
+            layers: 原始地层列表
+            layer_names: 处理后的层名列表（与 FLAC3D 分组名一致）
+        """
+        info_path = output_path.replace('.f3grid', '_model_info.txt')
+
+        print(f"\n--- 写入模型信息 ---")
+
+        # 岩层材料参数预设（可根据需要修改）
+        # 格式: bulk(Pa), shear(Pa), cohesion(Pa), friction(deg), tension(Pa), density(kg/m3)
+        material_params = {
+            'coal': {
+                'bulk': 1.25e9, 'shear': 0.71e9, 'cohesion': 3.9e6,
+                'friction': 26, 'tension': 1.8e6, 'density': 1380,
+                'comment': '煤层'
+            },
+            'mudstone': {
+                'bulk': 4.36e9, 'shear': 3e9, 'cohesion': 2.2e6,
+                'friction': 35, 'tension': 1.3e6, 'density': 2640,
+                'comment': '泥岩'
+            },
+            'sandstone': {
+                'bulk': 6.07e9, 'shear': 5.68e9, 'cohesion': 6.5e6,
+                'friction': 33, 'tension': 1.6e6, 'density': 2700,
+                'comment': '砂岩'
+            },
+            'sandy_mudstone': {
+                'bulk': 9.24e9, 'shear': 5.02e9, 'cohesion': 3.5e6,
+                'friction': 33, 'tension': 2.43e6, 'density': 2610,
+                'comment': '砂质泥岩'
+            },
+            'carbonaceous_mudstone': {
+                'bulk': 5.33e9, 'shear': 4.20e9, 'cohesion': 10.26e6,
+                'friction': 33, 'tension': 2.1e6, 'density': 2700,
+                'comment': '炭质泥岩'
+            },
+            'siltstone': {
+                'bulk': 5.33e9, 'shear': 4.20e9, 'cohesion': 6.3e6,
+                'friction': 33, 'tension': 3.1e6, 'density': 2700,
+                'comment': '粉砂岩'
+            },
+            'limestone': {
+                'bulk': 7.29e9, 'shear': 6.84e9, 'cohesion': 6.1e6,
+                'friction': 26, 'tension': 2.5e6, 'density': 2700,
+                'comment': '灰�ite'
+            },
+            'shale': {
+                'bulk': 4.36e9, 'shear': 3e9, 'cohesion': 2.2e6,
+                'friction': 35, 'tension': 1.3e6, 'density': 2640,
+                'comment': '页岩'
+            },
+            'default': {
+                'bulk': 5.33e9, 'shear': 4.20e9, 'cohesion': 6.3e6,
+                'friction': 33, 'tension': 3.1e6, 'density': 2700,
+                'comment': '默认参数'
+            }
+        }
+
+        with open(info_path, 'w', encoding='utf-8') as f:
+            f.write("=" * 70 + "\n")
+            f.write("地质模型信息 (Geological Model Information)\n")
+            f.write("=" * 70 + "\n")
+            f.write(f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"导出文件: {os.path.basename(output_path)}\n")
+            f.write("\n")
+
+            # 坐标范围（原始坐标）
+            f.write("-" * 70 + "\n")
+            f.write("模型边界范围 (原始坐标)\n")
+            f.write("-" * 70 + "\n")
+            x_min, x_max = self.stats.coord_range_x
+            y_min, y_max = self.stats.coord_range_y
+            z_min, z_max = self.stats.coord_range_z
+            size_x, size_y, size_z = self.stats.model_size
+
+            f.write(f"X 范围: {x_min:.2f} ~ {x_max:.2f} m (尺寸: {size_x:.2f} m)\n")
+            f.write(f"Y 范围: {y_min:.2f} ~ {y_max:.2f} m (尺寸: {size_y:.2f} m)\n")
+            f.write(f"Z 范围: {z_min:.2f} ~ {z_max:.2f} m (尺寸: {size_z:.2f} m)\n")
+            f.write("\n")
+
+            # 原点偏移信息
+            ox, oy, oz = self.stats.origin_offset
+            f.write("-" * 70 + "\n")
+            f.write("坐标系统信息\n")
+            f.write("-" * 70 + "\n")
+            f.write("FLAC3D 模型使用相对坐标系统，原点位于模型最小角点。\n")
+            f.write(f"原点偏移量: X={ox:.6f}, Y={oy:.6f}, Z={oz:.6f}\n")
+            f.write("\n")
+            f.write("坐标转换公式:\n")
+            f.write(f"  X_绝对 = X_FLAC3D + {ox:.6f}\n")
+            f.write(f"  Y_绝对 = Y_FLAC3D + {oy:.6f}\n")
+            f.write(f"  Z_绝对 = Z_FLAC3D + {oz:.6f}\n")
+            f.write("\n")
+
+            # 模型统计
+            f.write("-" * 70 + "\n")
+            f.write("模型统计\n")
+            f.write("-" * 70 + "\n")
+            f.write(f"总节点数: {self.stats.total_gridpoints:,}\n")
+            f.write(f"总单元数: {self.stats.total_zones:,}\n")
+            f.write(f"共享节点数: {self.stats.shared_nodes:,}\n")
+            f.write(f"过滤退化单元: {self.stats.degenerate_zones_removed:,}\n")
+            f.write(f"分组数: {self.stats.groups}\n")
+            if self.stats.min_thickness < float('inf'):
+                f.write(f"厚度范围: {self.stats.min_thickness:.3f} ~ {self.stats.max_thickness:.3f} m\n")
+            f.write(f"文件大小: {self.stats.file_size_kb:.1f} KB\n")
+            f.write("\n")
+
+            # 地层详细信息
+            f.write("-" * 70 + "\n")
+            f.write("地层信息 (从下到上排序)\n")
+            f.write("-" * 70 + "\n")
+            f.write(f"{'序号':<6} {'原始名称':<20} {'FLAC3D分组名':<25} {'单元数':<12} {'平均厚度':<12}\n")
+            f.write("-" * 70 + "\n")
+
+            for i, (layer, safe_name) in enumerate(zip(layers, layer_names)):
+                original_name = layer.get('name', f'Layer_{i}')
+                zone_count = len(self.groups.get(safe_name, []))
+
+                # 计算平均厚度
+                top_z = np.asarray(layer['top_surface_z'], dtype=float)
+                bottom_z = np.asarray(layer['bottom_surface_z'], dtype=float)
+                valid_mask = ~(np.isnan(top_z) | np.isnan(bottom_z))
+                if np.any(valid_mask):
+                    avg_thickness = np.mean((top_z - bottom_z)[valid_mask])
+                else:
+                    avg_thickness = 0.0
+
+                f.write(f"{i+1:<6} {original_name:<20} {safe_name:<25} {zone_count:<12,} {avg_thickness:<12.3f}\n")
+
+            f.write("\n")
+
+            # 煤层单独列出
+            f.write("-" * 70 + "\n")
+            f.write("煤层信息\n")
+            f.write("-" * 70 + "\n")
+            coal_layers_found = []
+            for i, (layer, safe_name) in enumerate(zip(layers, layer_names)):
+                original_name = layer.get('name', f'Layer_{i}')
+                if '煤' in original_name or 'coal' in original_name.lower():
+                    top_z = np.asarray(layer['top_surface_z'], dtype=float)
+                    bottom_z = np.asarray(layer['bottom_surface_z'], dtype=float)
+                    valid_mask = ~(np.isnan(top_z) | np.isnan(bottom_z))
+                    if np.any(valid_mask):
+                        avg_thickness = np.mean((top_z - bottom_z)[valid_mask])
+                        min_thickness = np.min((top_z - bottom_z)[valid_mask])
+                        max_thickness = np.max((top_z - bottom_z)[valid_mask])
+                        avg_elevation = np.mean(top_z[valid_mask])
+                    else:
+                        avg_thickness = min_thickness = max_thickness = avg_elevation = 0.0
+
+                    zone_count = len(self.groups.get(safe_name, []))
+                    coal_layers_found.append({
+                        'index': i + 1,
+                        'name': original_name,
+                        'flac_name': safe_name,
+                        'avg_thickness': avg_thickness,
+                        'min_thickness': min_thickness,
+                        'max_thickness': max_thickness,
+                        'avg_elevation': avg_elevation,
+                        'zone_count': zone_count
+                    })
+
+            if coal_layers_found:
+                for coal in coal_layers_found:
+                    f.write(f"\n煤层 {coal['index']}: {coal['name']}\n")
+                    f.write(f"  FLAC3D 分组名: {coal['flac_name']}\n")
+                    f.write(f"  单元数: {coal['zone_count']:,}\n")
+                    f.write(f"  平均厚度: {coal['avg_thickness']:.3f} m\n")
+                    f.write(f"  厚度范围: {coal['min_thickness']:.3f} ~ {coal['max_thickness']:.3f} m\n")
+                    f.write(f"  平均标高: {coal['avg_elevation']:.2f} m\n")
+            else:
+                f.write("未识别到煤层\n")
+
+            f.write("\n")
+
+            # 分组与单元数统计
+            f.write("-" * 70 + "\n")
+            f.write("FLAC3D 分组统计\n")
+            f.write("-" * 70 + "\n")
+            for name, zone_ids in self.groups.items():
+                if zone_ids:
+                    f.write(f"  {name}: {len(zone_ids):,} 单元\n")
+
+            f.write("\n")
+
+            # ============================================================
+            # FLAC3D 完整代码
+            # ============================================================
+            f.write("=" * 70 + "\n")
+            f.write("FLAC3D 完整代码 (可直接复制使用)\n")
+            f.write("=" * 70 + "\n\n")
+
+            # 1. 模型创建和导入
+            f.write("; " + "=" * 68 + "\n")
+            f.write("; 1. 模型创建和网格导入\n")
+            f.write("; " + "=" * 68 + "\n")
+            f.write("model new\n")
+            f.write(f'zone import "{os.path.basename(output_path)}"\n')
+            f.write("zone attach by-face\n")
+            f.write("\n")
+            f.write("model save 'moxing.sav'\n")
+            f.write("\n\n")
+
+            # 2. 本构模型
+            f.write("; " + "=" * 68 + "\n")
+            f.write("; 2. 本构模型赋值\n")
+            f.write("; " + "=" * 68 + "\n")
+            f.write(";model restore 'moxing.sav'\n")
+            f.write("zone cmodel assign mohr-coulomb\n")
+            f.write("\n\n")
+
+            # 3. 材料参数赋值
+            f.write("; " + "=" * 68 + "\n")
+            f.write("; 3. 材料参数赋值\n")
+            f.write("; " + "=" * 68 + "\n")
+            f.write("; 参数说明: bulk=体积模量(Pa), shear=剪切模量(Pa), cohesion=粘聚力(Pa)\n")
+            f.write(";           friction=内摩擦角(deg), tension=抗拉强度(Pa), density=密度(kg/m3)\n")
+            f.write("; " + "-" * 68 + "\n\n")
+
+            # 获取唯一的分组名（去重）
+            unique_groups = list(dict.fromkeys(layer_names))
+
+            for group_name in unique_groups:
+                if group_name not in self.groups or not self.groups[group_name]:
+                    continue
+
+                # 确定材料类型
+                if group_name.startswith('coal'):
+                    params = material_params['coal']
+                    material_type = 'coal'
+                elif group_name in material_params:
+                    params = material_params[group_name]
+                    material_type = group_name
+                else:
+                    # 尝试匹配基础岩性
+                    params = material_params['default']
+                    material_type = 'default'
+                    for base_type in ['mudstone', 'sandstone', 'siltstone', 'limestone', 'shale']:
+                        if base_type in group_name:
+                            params = material_params[base_type]
+                            material_type = base_type
+                            break
+
+                # 查找原始名称
+                original_names = []
+                for layer, safe_name in zip(layers, layer_names):
+                    if safe_name == group_name:
+                        original_names.append(layer.get('name', ''))
+                original_name_str = ', '.join(set(original_names)) if original_names else group_name
+
+                # 写入参数行
+                f.write(f"; {original_name_str} ({params.get('comment', material_type)})\n")
+                f.write(f"zone\tproperty\tbulk\t{params['bulk']:.2E}\tshear\t{params['shear']:.2E}\t")
+                f.write(f"cohesion\t{params['cohesion']:.1E}\tfriction\t{params['friction']}\t")
+                f.write(f"tension\t{params['tension']:.1E}\tdensity {params['density']}\t")
+                f.write(f"range\tgroup '{group_name}'\n")
+                f.write("\n")
+
+            f.write("\n")
+
+            # 4. 边界条件
+            f.write("; " + "=" * 68 + "\n")
+            f.write("; 4. 边界条件\n")
+            f.write("; " + "=" * 68 + "\n")
+
+            # 计算边界位置（使用相对坐标，即0到size）
+            f.write(f"; 模型尺寸: X={size_x:.1f}m, Y={size_y:.1f}m, Z={size_z:.1f}m\n")
+            f.write("; " + "-" * 68 + "\n\n")
+
+            f.write("; X方向边界固定\n")
+            f.write("zone gridpoint fix velocity-x range position-x -0.1 0.1\n")
+            f.write(f"zone gridpoint fix velocity-x range position-x {size_x-0.1:.1f} {size_x+0.1:.1f}\n")
+            f.write("\n")
+
+            f.write("; Y方向边界固定\n")
+            f.write("zone gridpoint fix velocity-y range position-y -0.1 0.1\n")
+            f.write(f"zone gridpoint fix velocity-y range position-y {size_y-0.1:.1f} {size_y+0.1:.1f}\n")
+            f.write("\n")
+
+            f.write("; Z方向底部固定\n")
+            f.write("zone gridpoint fix velocity-z range position-z -0.1 0.1\n")
+            f.write("\n")
+
+            f.write("; 顶部应力边界（可选，根据埋深调整）\n")
+            f.write(f";zone face apply stress-normal -22.4e6 range position-z {size_z-0.1:.1f} {size_z+0.1:.1f}\n")
+            f.write("\n\n")
+
+            # 5. 重力和初始应力
+            f.write("; " + "=" * 68 + "\n")
+            f.write("; 5. 重力和初始应力\n")
+            f.write("; " + "=" * 68 + "\n")
+            f.write("model gravity 0 0 -9.8\n")
+            f.write("\n")
+            f.write("; 初始应力设置（可选，根据实际情况调整）\n")
+            f.write(";zone initialize-stress overburden -22.4e6\n")
+            f.write(";zone initialize stress-xx -15e6 grad (0,0,25000)\n")
+            f.write(";zone initialize stress-yy -15e6 grad (0,0,25000)\n")
+            f.write(";zone initialize stress-zz -12.5e6 grad (0,0,25000)\n")
+            f.write("\n\n")
+
+            # 6. 求解和保存
+            f.write("; " + "=" * 68 + "\n")
+            f.write("; 6. 求解和保存\n")
+            f.write("; " + "=" * 68 + "\n")
+            f.write("model solve\n")
+            f.write("model save 'moxingpingheng.sav'\n")
+            f.write("\n\n")
+
+            # 7. 煤层开挖示例（如果有煤层）
+            if coal_layers_found:
+                f.write("; " + "=" * 68 + "\n")
+                f.write("; 7. 煤层开挖示例\n")
+                f.write("; " + "=" * 68 + "\n")
+                f.write(";model restore 'moxingpingheng.sav'\n")
+                f.write("\n")
+                for coal in coal_layers_found:
+                    f.write(f"; 开挖 {coal['name']}\n")
+                    f.write(f";zone delete range group '{coal['flac_name']}'\n")
+                f.write("\n")
+                f.write(";model solve\n")
+                f.write(";model save 'kaiwawan.sav'\n")
+
+            f.write("\n")
+            f.write("; " + "=" * 68 + "\n")
+            f.write("; End of FLAC3D Code\n")
+            f.write("; " + "=" * 68 + "\n")
+
+        print(f"  模型信息已保存: {info_path}")
+        return info_path
 
 
 def export_f3grid(data: Dict[str, Any], output_path: str,
