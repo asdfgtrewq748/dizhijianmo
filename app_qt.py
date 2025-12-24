@@ -254,11 +254,34 @@ class GeologicalModelingApp(QMainWindow):
         
         # 视图菜单
         view_menu = menubar.addMenu('视图(&V)')
-        
+
         refresh_action = QAction('刷新渲染(&R)', self)
         refresh_action.setShortcut('Ctrl+R')
         refresh_action.triggered.connect(self.refresh_render)
         view_menu.addAction(refresh_action)
+
+        # 科研图表菜单
+        chart_menu = menubar.addMenu('科研图表(&C)')
+
+        geo_chart_action = QAction('地质专业图表(&G)...', self)
+        geo_chart_action.setShortcut('Ctrl+G')
+        geo_chart_action.triggered.connect(self.open_geology_charts)
+        chart_menu.addAction(geo_chart_action)
+
+        ml_chart_action = QAction('机器学习图表(&M)...', self)
+        ml_chart_action.triggered.connect(self.open_ml_charts)
+        chart_menu.addAction(ml_chart_action)
+
+        result_chart_action = QAction('结果分析图表(&A)...', self)
+        result_chart_action.triggered.connect(self.open_result_charts)
+        chart_menu.addAction(result_chart_action)
+
+        chart_menu.addSeparator()
+
+        batch_export_action = QAction('批量导出所有图表(&B)...', self)
+        batch_export_action.setShortcut('Ctrl+Shift+E')
+        batch_export_action.triggered.connect(self.batch_export_charts)
+        chart_menu.addAction(batch_export_action)
 
     def load_settings(self):
         """加载用户配置"""
@@ -592,7 +615,14 @@ class GeologicalModelingApp(QMainWindow):
         self.interactive_slice_cb = QCheckBox("交互式手柄")
         self.interactive_slice_cb.stateChanged.connect(self.on_interactive_slice_toggled)
         slice_layout.addWidget(self.interactive_slice_cb)
-        
+
+        # 导出剖面按钮
+        self.export_slice_btn = QPushButton("📸 导出剖面图")
+        self.export_slice_btn.setObjectName("success")
+        self.export_slice_btn.setToolTip("导出当前剖面视图的PNG截图")
+        self.export_slice_btn.clicked.connect(self.export_slice_view)
+        slice_layout.addWidget(self.export_slice_btn)
+
         self.slice_controls.setVisible(False)
         interact_layout.addWidget(self.slice_controls)
 
@@ -619,19 +649,21 @@ class GeologicalModelingApp(QMainWindow):
 
         # 地层选择工具栏 - 改进
         layer_toolbar = QHBoxLayout()
+        layer_toolbar.setSpacing(5)  # 设置按钮间距
+
         self.select_all_btn = QPushButton("全选")
-        self.select_all_btn.setMaximumWidth(60)
-        self.select_all_btn.setFont(QFont("Microsoft YaHei", 9))
+        self.select_all_btn.setMinimumWidth(55)
+        self.select_all_btn.setMaximumWidth(70)
         self.select_all_btn.clicked.connect(self.select_all_layers)
 
         self.select_none_btn = QPushButton("清空")
-        self.select_none_btn.setMaximumWidth(60)
-        self.select_none_btn.setFont(QFont("Microsoft YaHei", 9))
+        self.select_none_btn.setMinimumWidth(55)
+        self.select_none_btn.setMaximumWidth(70)
         self.select_none_btn.clicked.connect(self.deselect_all_layers)
 
         self.invert_selection_btn = QPushButton("反选")
-        self.invert_selection_btn.setMaximumWidth(60)
-        self.invert_selection_btn.setFont(QFont("Microsoft YaHei", 9))
+        self.invert_selection_btn.setMinimumWidth(55)
+        self.invert_selection_btn.setMaximumWidth(70)
         self.invert_selection_btn.clicked.connect(self.invert_layer_selection)
 
         layer_toolbar.addWidget(self.select_all_btn)
@@ -763,7 +795,7 @@ class GeologicalModelingApp(QMainWindow):
         # 导出
         export_group = QGroupBox("💾 导出")
         export_layout = QVBoxLayout()
-        export_layout.setSpacing(10)
+        export_layout.setSpacing(8)
 
         self.export_png_btn = QPushButton("PNG截图")
         self.export_png_btn.setObjectName("success")
@@ -811,25 +843,34 @@ class GeologicalModelingApp(QMainWindow):
         export_layout.addWidget(self.flac3d_downsample_spin)
 
         # FLAC3D 格式选择
-        export_layout.addWidget(QLabel("FLAC3D格式:"))
+        flac3d_format_label = QLabel("FLAC3D格式:")
+        flac3d_format_label.setWordWrap(True)
+        export_layout.addWidget(flac3d_format_label)
+
         self.flac3d_format_combo = QComboBox()
-        self.flac3d_format_combo.addItems(['f3grid (推荐)', 'FPN (中间格式)', '紧凑脚本', '完整脚本'])
+        self.flac3d_format_combo.addItems(['f3grid', 'FPN', '紧凑', '完整'])
         self.flac3d_format_combo.setToolTip(
-            "f3grid: 原生网格格式，使用 zone import f3grid 导入\n"
-            "FPN: Midas GTS NX中间格式，可用转换工具转换为f3grid\n"
-            "紧凑脚本: .f3dat 格式，文件小\n"
-            "完整脚本: .f3dat 传统格式，兼容性好"
+            "f3grid: 原生网格格式(推荐)\n"
+            "  使用 zone import f3grid 导入\n\n"
+            "FPN: Midas GTS NX中间格式\n"
+            "  可用转换工具转为f3grid\n\n"
+            "紧凑: .f3dat 格式，文件小\n\n"
+            "完整: .f3dat 传统格式，兼容好"
         )
         export_layout.addWidget(self.flac3d_format_combo)
 
         # 接触面选项（仅对 f3grid 和 FPN 格式有效）
-        self.create_interfaces_checkbox = QCheckBox("创建层间接触面 (Interface)")
+        self.create_interfaces_checkbox = QCheckBox("创建层间接触面")
         self.create_interfaces_checkbox.setToolTip(
-            "启用后，层间节点不共享，并生成接触面定义脚本\n"
-            "用于模拟层间滑动、分离等接触行为\n"
-            "注意：仅对 f3grid 和 FPN 格式有效"
+            "启用后，层间节点不共享，\n"
+            "并生成接触面定义脚本\n\n"
+            "用于模拟层间滑动、分离等\n"
+            "接触行为\n\n"
+            "注意：仅对 f3grid 和 FPN\n"
+            "格式有效"
         )
         self.create_interfaces_checkbox.setChecked(False)
+        self.create_interfaces_checkbox.setWordWrap(True)
         export_layout.addWidget(self.create_interfaces_checkbox)
 
         export_group.setLayout(export_layout)
@@ -1694,13 +1735,65 @@ class GeologicalModelingApp(QMainWindow):
         """漫游模式开关"""
         if not self.plotter:
             return
-            
+
         if state == Qt.CheckState.Checked.value:
             self.plotter.enable_terrain_style(mouse_wheel_zooms=True)
             self.log("已启用漫游模式: 左键旋转，中键平移，右键缩放/前进")
         else:
             self.plotter.enable_trackball_style()
             self.log("已恢复标准视图模式")
+
+    def export_slice_view(self):
+        """导出剖面视图"""
+        if not self.plotter or not self.block_models:
+            QMessageBox.warning(self, "警告", "请先构建三维模型!")
+            return
+
+        if not self.slice_cb.isChecked():
+            QMessageBox.warning(self, "警告", "请先启用剖面切割!")
+            return
+
+        # 弹出保存对话框
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "保存剖面图", "cross_section.png", "PNG Files (*.png)"
+        )
+
+        if not file_path:
+            return
+
+        try:
+            # 获取当前视角和剖面信息
+            axis = self.slice_axis_combo.currentText()
+            pos_ratio = self.slice_pos_slider.value()
+
+            self.log(f"\n正在导出剖面图...")
+            self.log(f"  切割方向: {axis}")
+            self.log(f"  位置: {pos_ratio}%")
+
+            # 保存截图（高分辨率）
+            self.plotter.screenshot(file_path, scale=3, transparent_background=False)
+
+            self.log(f"✓ 剖面图导出成功: {file_path}")
+
+            # 询问是否打开文件夹
+            reply = QMessageBox.question(
+                self, "导出成功",
+                f"剖面图已保存:\n{file_path}\n\n是否打开所在文件夹?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+
+            if reply == QMessageBox.StandardButton.Yes:
+                folder_path = os.path.dirname(file_path)
+                try:
+                    os.startfile(folder_path)
+                except Exception as e:
+                    self.log(f"无法打开文件夹: {e}")
+
+        except Exception as e:
+            import traceback
+            error_msg = f"导出剖面图失败: {str(e)}\n{traceback.format_exc()}"
+            self.log(f"✗ {error_msg}")
+            QMessageBox.critical(self, "错误", f"导出剖面图失败:\n{str(e)}")
 
     def on_model_built(self, block_models, XI, YI):
         """三维模型构建完成"""
@@ -3120,6 +3213,100 @@ class GeologicalModelingApp(QMainWindow):
             error_msg = f"导出失败: {str(e)}\n{traceback.format_exc()}"
             self.log(f"✗ {error_msg}")
             QMessageBox.critical(self, "错误", f"导出失败:\n{str(e)}")
+
+    def open_geology_charts(self):
+        """打开地质专业图表对话框"""
+        if self.data_result is None:
+            QMessageBox.warning(self, "警告", "请先加载数据!")
+            return
+
+        from src.gui.chart_dialog import GeologyChartDialog
+        dialog = GeologyChartDialog(self, self.data_result)
+        dialog.exec()
+
+    def open_ml_charts(self):
+        """打开机器学习图表对话框"""
+        if self.data_result is None:
+            QMessageBox.warning(self, "警告", "请先加载数据!")
+            return
+
+        if self.model is None and self.predictor is None:
+            QMessageBox.warning(self, "警告", "请先训练模型!")
+            return
+
+        from src.gui.chart_dialog import MLChartDialog
+        dialog = MLChartDialog(self, self.data_result, self.model, self.predictor)
+        dialog.exec()
+
+    def open_result_charts(self):
+        """打开结果分析图表对话框"""
+        if self.block_models is None:
+            QMessageBox.warning(self, "警告", "请先构建三维模型!")
+            return
+
+        from src.gui.chart_dialog import ResultChartDialog
+        dialog = ResultChartDialog(self, self.data_result, self.block_models, self.XI, self.YI)
+        dialog.exec()
+
+    def batch_export_charts(self):
+        """批量导出所有图表"""
+        if self.data_result is None:
+            QMessageBox.warning(self, "警告", "请先加载数据!")
+            return
+
+        # 选择输出目录
+        output_dir = QFileDialog.getExistingDirectory(
+            self, "选择输出目录", "", QFileDialog.Option.ShowDirsOnly
+        )
+
+        if not output_dir:
+            return
+
+        try:
+            from src.visualization import create_all_figures, FigureExporter
+
+            self.log("\n开始批量导出科研图表...")
+            self.log(f"输出目录: {output_dir}")
+
+            # 准备原始DataFrame
+            raw_df = self.data_result.get('raw_df')
+            if raw_df is None:
+                QMessageBox.warning(self, "警告", "缺少原始数据，无法生成图表")
+                return
+
+            # 生成所有图表
+            figures = create_all_figures(
+                df=raw_df,
+                result=self.data_result,
+                trainer=None,  # 可以传入训练器
+                geo_model=None,  # 可以传入地质模型
+                output_dir=output_dir
+            )
+
+            # 导出图表
+            exporter = FigureExporter(output_dir)
+            exported = exporter.export_batch(figures, formats=['png', 'pdf'], dpi=300)
+
+            self.log(f"✓ 批量导出完成！共导出 {len(exported)} 个图表")
+
+            # 询问是否打开文件夹
+            reply = QMessageBox.question(
+                self, "导出成功",
+                f"已导出 {len(exported)} 个图表到:\n{output_dir}\n\n是否打开文件夹?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+
+            if reply == QMessageBox.StandardButton.Yes:
+                try:
+                    os.startfile(output_dir)
+                except Exception as e:
+                    self.log(f"无法打开文件夹: {e}")
+
+        except Exception as e:
+            import traceback
+            error_msg = f"批量导出失败: {str(e)}\n{traceback.format_exc()}"
+            self.log(f"✗ {error_msg}")
+            QMessageBox.critical(self, "错误", f"批量导出失败:\n{str(e)}")
 
     def on_error(self, message: str):
         """错误处理"""
