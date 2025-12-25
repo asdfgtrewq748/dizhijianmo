@@ -70,9 +70,15 @@ from src.gui.dialogs import BoreholeInfoDialog
 from src.gui.progress_dialog import ModernProgressDialog
 from src.gui.styles import MODERN_STYLE
 from src.gui.utils import setup_logging, global_exception_hook
+from src.gui.export_dialog import PublicationExportDialog
+from src.gui.batch_export_dialog import BatchExportDialog
+from src.gui.collapsible_groupbox import CollapsibleGroupBox
+from src.gui.animations import AnimationUtils
 
 if PYVISTA_AVAILABLE:
     from src.pyvista_renderer import GeologicalModelRenderer, RockMaterial, TextureGenerator
+    from src.gui.camera_presets import CameraPresetManager
+    from src.gui.scientific_annotations import ScientificAnnotations
 
 # FLAC3D导出器
 try:
@@ -220,6 +226,9 @@ class GeologicalModelingApp(QMainWindow):
         main_layout.addWidget(splitter)
 
         self.statusBar().showMessage("就绪 | GPU: 检测中...")
+        
+        # 启动动画
+        AnimationUtils.fade_in(self)
 
     def create_menu_bar(self):
         """创建菜单栏"""
@@ -244,7 +253,15 @@ class GeologicalModelingApp(QMainWindow):
         load_data_action.setShortcut('Ctrl+O')
         load_data_action.triggered.connect(self.load_data)
         file_menu.addAction(load_data_action)
-        
+
+        file_menu.addSeparator()
+
+        # 批量导出
+        batch_export_action = QAction('批量导出多视角(&B)...', self)
+        batch_export_action.setShortcut('Ctrl+Shift+E')
+        batch_export_action.triggered.connect(self.open_batch_export_dialog)
+        file_menu.addAction(batch_export_action)
+
         file_menu.addSeparator()
         
         exit_action = QAction('退出(&X)', self)
@@ -254,6 +271,25 @@ class GeologicalModelingApp(QMainWindow):
         
         # 视图菜单
         view_menu = menubar.addMenu('视图(&V)')
+
+        # 相机预设子菜单
+        camera_menu = view_menu.addMenu('相机视角(&C)')
+        if PYVISTA_AVAILABLE:
+            for preset_name in CameraPresetManager.get_preset_names():
+                action = QAction(preset_name, self)
+                description = CameraPresetManager.get_preset_description(preset_name)
+                action.setStatusTip(description)
+                action.triggered.connect(lambda _, name=preset_name: self.apply_camera_preset(name))
+                camera_menu.addAction(action)
+
+            camera_menu.addSeparator()
+
+            # 保存当前视角
+            save_view_action = QAction('保存当前视角...(&S)', self)
+            save_view_action.triggered.connect(self.save_current_camera_preset)
+            camera_menu.addAction(save_view_action)
+
+        view_menu.addSeparator()
 
         refresh_action = QAction('刷新渲染(&R)', self)
         refresh_action.setShortcut('Ctrl+R')
@@ -747,6 +783,13 @@ class GeologicalModelingApp(QMainWindow):
         self.show_boreholes_cb.stateChanged.connect(self.on_boreholes_toggled)
         render_layout.addWidget(self.show_boreholes_cb)
 
+        # 高级渲染选项
+        self.high_quality_cb = QCheckBox("✨ 高质量渲染 (PBR/SSAO)")
+        self.high_quality_cb.setToolTip("启用物理渲染、环境光遮蔽和阴影效果。\n可能会降低性能。")
+        self.high_quality_cb.setChecked(False)
+        self.high_quality_cb.stateChanged.connect(self.toggle_rendering_quality)
+        render_layout.addWidget(self.high_quality_cb)
+
         refresh_btn = QPushButton("🔄 刷新渲染")
         refresh_btn.clicked.connect(self.refresh_render)
         render_layout.addWidget(refresh_btn)
@@ -754,20 +797,18 @@ class GeologicalModelingApp(QMainWindow):
         render_group.setLayout(render_layout)
         layout.addWidget(render_group)
 
-        # 高级功能
-        advanced_group = QGroupBox("高级功能")
-        advanced_layout = QVBoxLayout()
-        advanced_layout.setSpacing(10)
+        # 高级功能（可折叠）
+        advanced_group = CollapsibleGroupBox("🔬 高级功能", collapsed=True)
 
         # 等值线
         self.contour_cb = QCheckBox("显示等值线")
         self.contour_cb.stateChanged.connect(self.on_contour_toggled)
-        advanced_layout.addWidget(self.contour_cb)
+        advanced_group.add_widget(self.contour_cb)
 
         self.contour_params_widget = QWidget()
         contour_layout = QVBoxLayout(self.contour_params_widget)
         contour_layout.setContentsMargins(0, 0, 0, 0)
-        
+
         contour_layout.addWidget(QLabel("类型:"))
         self.contour_type_combo = QComboBox()
         self.contour_type_combo.addItems(['底板高程', '地层厚度'])
@@ -780,72 +821,70 @@ class GeologicalModelingApp(QMainWindow):
         self.contour_interval_spin.setValue(10.0)
         self.contour_interval_spin.valueChanged.connect(self.on_contour_params_changed)
         contour_layout.addWidget(self.contour_interval_spin)
-        
+
         self.contour_params_widget.setVisible(False)
-        advanced_layout.addWidget(self.contour_params_widget)
+        advanced_group.add_widget(self.contour_params_widget)
 
         # 漫游模式
         self.fly_mode_cb = QCheckBox("虚拟漫游模式 (WASD)")
         self.fly_mode_cb.stateChanged.connect(self.on_fly_mode_toggled)
-        advanced_layout.addWidget(self.fly_mode_cb)
+        advanced_group.add_widget(self.fly_mode_cb)
 
-        advanced_group.setLayout(advanced_layout)
         layout.addWidget(advanced_group)
 
-        # 导出
-        export_group = QGroupBox("💾 导出")
-        export_layout = QVBoxLayout()
-        export_layout.setSpacing(8)
+        # 导出（可折叠）
+        export_group = CollapsibleGroupBox("💾 导出", collapsed=True)
 
         self.export_png_btn = QPushButton("PNG截图")
         self.export_png_btn.setObjectName("success")
         self.export_png_btn.clicked.connect(lambda: self.export_model('png'))
         self.export_png_btn.setEnabled(False)
-        export_layout.addWidget(self.export_png_btn)
+        export_group.add_widget(self.export_png_btn)
 
         self.export_html_btn = QPushButton("HTML交互")
         self.export_html_btn.setObjectName("success")
         self.export_html_btn.clicked.connect(lambda: self.export_model('html'))
         self.export_html_btn.setEnabled(False)
-        export_layout.addWidget(self.export_html_btn)
+        export_group.add_widget(self.export_html_btn)
 
         self.export_obj_btn = QPushButton("OBJ模型")
         self.export_obj_btn.setObjectName("success")
         self.export_obj_btn.clicked.connect(lambda: self.export_model('obj'))
         self.export_obj_btn.setEnabled(False)
-        export_layout.addWidget(self.export_obj_btn)
+        export_group.add_widget(self.export_obj_btn)
 
         self.export_stl_btn = QPushButton("STL模型")
         self.export_stl_btn.setObjectName("success")
         self.export_stl_btn.clicked.connect(lambda: self.export_model('stl'))
         self.export_stl_btn.setEnabled(False)
-        export_layout.addWidget(self.export_stl_btn)
+        export_group.add_widget(self.export_stl_btn)
 
         self.export_vtk_btn = QPushButton("VTK模型")
         self.export_vtk_btn.setObjectName("success")
         self.export_vtk_btn.clicked.connect(lambda: self.export_model('vtk'))
         self.export_vtk_btn.setEnabled(False)
-        export_layout.addWidget(self.export_vtk_btn)
+        export_group.add_widget(self.export_vtk_btn)
 
         self.export_flac3d_btn = QPushButton("FLAC3D网格")
         self.export_flac3d_btn.setObjectName("success")
         self.export_flac3d_btn.clicked.connect(lambda: self.export_model('flac3d'))
         self.export_flac3d_btn.setEnabled(False)
-        export_layout.addWidget(self.export_flac3d_btn)
+        export_group.add_widget(self.export_flac3d_btn)
 
         # FLAC3D 降采样选项
-        export_layout.addWidget(QLabel("FLAC3D降采样:"))
+        downsample_label = QLabel("FLAC3D降采样:")
+        export_group.add_widget(downsample_label)
         self.flac3d_downsample_spin = QSpinBox()
         self.flac3d_downsample_spin.setRange(1, 10)
         self.flac3d_downsample_spin.setValue(1)
         self.flac3d_downsample_spin.setSuffix("x")
         self.flac3d_downsample_spin.setToolTip("降采样因子：2x减少75%网格，3x减少89%网格\n推荐：大模型使用2-3x，小模型使用1x")
-        export_layout.addWidget(self.flac3d_downsample_spin)
+        export_group.add_widget(self.flac3d_downsample_spin)
 
         # FLAC3D 格式选择
         flac3d_format_label = QLabel("FLAC3D格式:")
         flac3d_format_label.setWordWrap(True)
-        export_layout.addWidget(flac3d_format_label)
+        export_group.add_widget(flac3d_format_label)
 
         self.flac3d_format_combo = QComboBox()
         self.flac3d_format_combo.addItems(['f3grid', 'FPN', '紧凑', '完整'])
@@ -857,7 +896,7 @@ class GeologicalModelingApp(QMainWindow):
             "紧凑: .f3dat 格式，文件小\n\n"
             "完整: .f3dat 传统格式，兼容好"
         )
-        export_layout.addWidget(self.flac3d_format_combo)
+        export_group.add_widget(self.flac3d_format_combo)
 
         # 接触面选项（仅对 f3grid 和 FPN 格式有效）
         self.create_interfaces_checkbox = QCheckBox("创建层间接触面")
@@ -870,10 +909,8 @@ class GeologicalModelingApp(QMainWindow):
             "格式有效"
         )
         self.create_interfaces_checkbox.setChecked(False)
-        self.create_interfaces_checkbox.setWordWrap(True)
-        export_layout.addWidget(self.create_interfaces_checkbox)
+        export_group.add_widget(self.create_interfaces_checkbox)
 
-        export_group.setLayout(export_layout)
         layout.addWidget(export_group)
 
         layout.addStretch()
@@ -929,15 +966,44 @@ class GeologicalModelingApp(QMainWindow):
         reset_btn = QPushButton("复位")
         reset_btn.setToolTip("复位到默认视角")
         reset_btn.setStyleSheet(btn_style)
-        reset_btn.clicked.connect(lambda: self.plotter.view_isometric() if self.plotter else None)
+        reset_btn.clicked.connect(lambda: self.apply_camera_preset("立体全景") if PYVISTA_AVAILABLE else None)
         header_layout.addWidget(reset_btn)
-        
+
         # 顶视图
         top_btn = QPushButton("顶视")
         top_btn.setToolTip("切换到顶部视角")
         top_btn.setStyleSheet(btn_style)
-        top_btn.clicked.connect(lambda: self.plotter.view_xy() if self.plotter else None)
+        top_btn.clicked.connect(lambda: self.apply_camera_preset("纯俯视图") if PYVISTA_AVAILABLE else None)
         header_layout.addWidget(top_btn)
+
+        # 剖面视角下拉菜单
+        section_btn = QPushButton("剖面 ▼")
+        section_btn.setToolTip("快速切换剖面视角")
+        section_btn.setStyleSheet(btn_style)
+
+        section_menu = QMenu(self)
+        section_menu.setStyleSheet("""
+            QMenu {
+                background-color: #313244;
+                color: #cdd6f4;
+                border: 1px solid #45475a;
+            }
+            QMenu::item {
+                padding: 5px 20px;
+            }
+            QMenu::item:selected {
+                background-color: #45475a;
+            }
+        """)
+
+        if PYVISTA_AVAILABLE:
+            for section in ["正北剖面", "正南剖面", "正东剖面", "正西剖面"]:
+                action = QAction(section, self)
+                action.triggered.connect(lambda _, s=section: self.apply_camera_preset(s))
+                section_menu.addAction(action)
+
+        section_btn.setMenu(section_menu)
+        header_layout.addWidget(section_btn)
         
         # 截图
         shot_btn = QPushButton("截图")
@@ -2545,7 +2611,17 @@ class GeologicalModelingApp(QMainWindow):
             
         finally:
             self.plotter.render_window.SetOffScreenRendering(0) # 恢复渲染
-            self.plotter.render() # 触发一次重绘
+        
+        self.plotter.render()
+
+    def toggle_rendering_quality(self, state):
+        """切换渲染质量"""
+        if not self.renderer:
+            return
+            
+        is_high_quality = (state == Qt.CheckState.Checked.value) if isinstance(state, int) else state
+        self.renderer.set_rendering_quality(is_high_quality)
+        self.request_render()
 
     def show_layer_context_menu(self, position):
         """显示地层列表右键菜单"""
@@ -2752,6 +2828,72 @@ class GeologicalModelingApp(QMainWindow):
                      self.plotter.remove_actor(f'borehole_cyl_{i}')
                      self.plotter.remove_actor(f'label_{i}')
 
+    def open_batch_export_dialog(self):
+        """打开批量导出对话框"""
+        if not PYVISTA_AVAILABLE or not self.plotter:
+            QMessageBox.warning(self, "警告", "3D渲染器未启用!")
+            return
+
+        if self.block_models is None:
+            QMessageBox.warning(self, "警告", "请先构建三维模型!")
+            return
+
+        dialog = BatchExportDialog(self, self.plotter)
+        dialog.exec()
+
+    def apply_camera_preset(self, preset_name: str):
+        """应用相机预设视角"""
+        if not self.plotter or not PYVISTA_AVAILABLE:
+            return
+
+        # 获取模型边界
+        bounds = None
+        if self.block_models:
+            bounds = self.plotter.bounds
+
+        success = CameraPresetManager.apply_preset(self.plotter, preset_name, bounds)
+
+        if success:
+            self.plotter.render()
+            self.log(f"✓ 已切换到视角: {preset_name}")
+            description = CameraPresetManager.get_preset_description(preset_name)
+            if description:
+                self.statusBar().showMessage(f"视角: {preset_name} - {description}")
+        else:
+            self.log(f"✗ 未找到视角预设: {preset_name}")
+
+    def save_current_camera_preset(self):
+        """保存当前视角为预设"""
+        if not self.plotter or not PYVISTA_AVAILABLE:
+            return
+
+        from PyQt6.QtWidgets import QInputDialog
+
+        # 弹出对话框输入名称
+        name, ok = QInputDialog.getText(
+            self, "保存视角预设", "请输入预设名称:",
+            QLineEdit.EchoMode.Normal, "自定义视角"
+        )
+
+        if ok and name:
+            description, ok2 = QInputDialog.getText(
+                self, "保存视角预设", "请输入描述（可选）:",
+                QLineEdit.EchoMode.Normal, ""
+            )
+
+            if ok2:
+                CameraPresetManager.save_current_as_preset(
+                    self.plotter, name, description
+                )
+                self.log(f"✓ 已保存视角预设: {name}")
+                QMessageBox.information(
+                    self, "保存成功",
+                    f"视角预设 '{name}' 已保存！\n\n"
+                    f"描述: {description if description else '无'}\n\n"
+                    f"注意: 此预设仅在当前会话有效，\n"
+                    f"如需永久保存，请修改 src/gui/camera_presets.py"
+                )
+
     def refresh_render(self):
         """刷新渲染 - 强制完整重建"""
         if self.block_models is not None and PYVISTA_AVAILABLE and self.plotter is not None:
@@ -2763,6 +2905,129 @@ class GeologicalModelingApp(QMainWindow):
             QMessageBox.warning(self, "警告", "请先构建三维模型!")
             return
 
+        # 对于PNG/TIFF等位图格式，使用专业导出对话框
+        if format_type in ['png', 'tiff', 'jpeg']:
+            dialog = PublicationExportDialog(self, format_type)
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return
+
+            settings = dialog.get_export_settings()
+
+            # 选择保存路径
+            ext = settings['format']
+            file_path, _ = QFileDialog.getSaveFileName(
+                self, f"保存{ext.upper()}图像",
+                f"geological_model.{ext}",
+                f"{ext.upper()} Files (*.{ext})"
+            )
+
+            if not file_path:
+                return
+
+            self.log(f"\n正在导出高质量 {ext.upper()}...")
+            self.log(f"  尺寸: {settings['width_mm']}×{settings['height_mm']} mm")
+            self.log(f"  DPI: {settings['dpi']}")
+            self.log(f"  像素: {settings['width_px']}×{settings['height_px']} px")
+
+            try:
+                # 临时添加注释元素
+                annotations_added = []
+
+                # 添加比例尺
+                if settings['add_scale_bar'] and PYVISTA_AVAILABLE:
+                    try:
+                        ScientificAnnotations.add_scale_bar(
+                            self.plotter,
+                            position='lower_right',
+                            color='black',
+                            font_size=14
+                        )
+                        annotations_added.append('scale_bar')
+                        self.log("  ✓ 已添加比例尺")
+                    except Exception as e:
+                        self.log(f"  警告: 添加比例尺失败 - {e}")
+
+                # 添加指北针
+                if settings['add_north_arrow'] and PYVISTA_AVAILABLE:
+                    try:
+                        ScientificAnnotations.add_north_arrow(
+                            self.plotter,
+                            position=(0.9, 0.9),
+                            size=50,
+                            color='red',
+                            show_text=True
+                        )
+                        annotations_added.append('north_arrow')
+                        self.log("  ✓ 已添加指北针")
+                    except Exception as e:
+                        self.log(f"  警告: 添加指北针失败 - {e}")
+
+                # 添加坐标系统信息
+                if settings.get('add_coordinate_info', True) and PYVISTA_AVAILABLE:
+                    try:
+                        z_scale = self.z_scale_slider.value() / 10.0 if hasattr(self, 'z_scale_slider') else 1.0
+                        ScientificAnnotations.add_coordinate_info(
+                            self.plotter,
+                            position='lower_left',
+                            coord_system="相对坐标系",
+                            z_exaggeration=z_scale,
+                            font_size=10,
+                            color='black'
+                        )
+                        annotations_added.append('coord_info')
+                    except Exception as e:
+                        self.log(f"  警告: 添加坐标信息失败 - {e}")
+
+                # 设置窗口大小以匹配目标分辨率
+                original_window_size = self.plotter.window_size
+                self.plotter.window_size = [settings['width_px'], settings['height_px']]
+
+                # 渲染一次以应用变化
+                self.plotter.render()
+
+                # 截图
+                self.plotter.screenshot(
+                    file_path,
+                    transparent_background=settings['transparent_background'],
+                    scale=1  # 已经通过window_size设置了分辨率
+                )
+
+                # 恢复窗口大小
+                self.plotter.window_size = original_window_size
+
+                # 移除临时添加的注释
+                if PYVISTA_AVAILABLE and annotations_added:
+                    ScientificAnnotations.remove_all_annotations(self.plotter)
+                    self.plotter.render()
+
+                self.log(f"✓ 导出成功: {file_path}")
+
+                # 询问是否打开文件夹
+                reply = QMessageBox.question(
+                    self, "导出成功",
+                    f"图像已保存:\n{file_path}\n\n"
+                    f"尺寸: {settings['width_px']}×{settings['height_px']} px\n"
+                    f"DPI: {settings['dpi']}\n\n"
+                    f"是否打开所在文件夹?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                )
+
+                if reply == QMessageBox.StandardButton.Yes:
+                    folder_path = os.path.dirname(file_path)
+                    try:
+                        os.startfile(folder_path)
+                    except Exception as e:
+                        self.log(f"无法打开文件夹: {e}")
+
+            except Exception as e:
+                import traceback
+                error_msg = f"导出失败: {str(e)}\n{traceback.format_exc()}"
+                self.log(f"✗ {error_msg}")
+                QMessageBox.critical(self, "错误", f"导出失败:\n{str(e)}")
+
+            return
+
+        # 其他格式保持原有逻辑
         if format_type == 'png':
             file_path, _ = QFileDialog.getSaveFileName(
                 self, "保存PNG截图", "geological_model.png", "PNG Files (*.png)"

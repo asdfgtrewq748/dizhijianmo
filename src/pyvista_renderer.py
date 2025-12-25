@@ -652,6 +652,29 @@ class GeologicalModelRenderer:
         )
         self.plotter.add_light(back_light)
 
+    def set_rendering_quality(self, high_quality: bool = True):
+        """设置渲染质量"""
+        if self.plotter is None:
+            return
+            
+        if high_quality:
+            # 开启高质量渲染特性
+            try:
+                self.plotter.enable_anti_aliasing('ssaa')
+                self.plotter.enable_ssao(radius=2, bias=0.01) # Screen Space Ambient Occlusion
+                self.plotter.enable_shadows()
+                self.plotter.enable_eye_dome_lighting() # EDL for better depth perception
+            except Exception as e:
+                print(f"Warning: Could not enable some high quality rendering features: {e}")
+        else:
+            try:
+                self.plotter.disable_anti_aliasing()
+                self.plotter.disable_ssao()
+                self.plotter.disable_shadows()
+                self.plotter.disable_eye_dome_lighting()
+            except Exception:
+                pass
+
     def add_borehole_markers(
         self,
         coords: np.ndarray,

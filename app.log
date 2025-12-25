@@ -7395,3 +7395,4 @@ ValueError: Input mesh does not have texture coordinates to support the texture.
 2025-12-24 17:58:13,892 - ERROR - Algorithm vtkPlaneSource (000002774735B300) returned failure for request: vtkInformation (00000279E1B6DC90)
 2025-12-24 17:58:13,893 - ERROR - Frame buffer object was not initialized correctly.
 2025-12-24 17:58:13,894 - ERROR - The framebuffer is incomplete : FRAMEBUFFER_INCOMPLETE_ATTACHMENT
+2025-12-25 18:14:16,244 - INFO - ✓ GPU检测: NVIDIA GeForce RTX 5060 Ti (15.9 GB)
